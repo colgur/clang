@@ -40,10 +40,10 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Timer.h"
-#include "llvm/System/Mutex.h"
-#include "llvm/System/Program.h"
-#include "llvm/System/Signals.h"
-#include "llvm/System/Threading.h"
+#include "llvm/Support/Mutex.h"
+#include "llvm/Support/Program.h"
+#include "llvm/Support/Signals.h"
+#include "llvm/Support/Threading.h"
 #include "llvm/Support/Compiler.h"
 
 using namespace clang;
@@ -410,10 +410,18 @@ CursorVisitor::getPreprocessedEntities() {
   bool OnlyLocalDecls
     = !AU->isMainFileAST() && AU->getOnlyLocalDecls();
   
+  PreprocessingRecord::iterator StartEntity, EndEntity;
+  if (OnlyLocalDecls) {
+    StartEntity = AU->pp_entity_begin();
+    EndEntity = AU->pp_entity_end();
+  } else {
+    StartEntity = PPRec.begin();
+    EndEntity = PPRec.end();
+  }
+  
   // There is no region of interest; we have to walk everything.
   if (RegionOfInterest.isInvalid())
-    return std::make_pair(PPRec.begin(OnlyLocalDecls),
-                          PPRec.end(OnlyLocalDecls));
+    return std::make_pair(StartEntity, EndEntity);
 
   // Find the file in which the region of interest lands.
   SourceManager &SM = AU->getSourceManager();
@@ -424,18 +432,16 @@ CursorVisitor::getPreprocessedEntities() {
   
   // The region of interest spans files; we have to walk everything.
   if (Begin.first != End.first)
-    return std::make_pair(PPRec.begin(OnlyLocalDecls),
-                          PPRec.end(OnlyLocalDecls));
+    return std::make_pair(StartEntity, EndEntity);
     
   ASTUnit::PreprocessedEntitiesByFileMap &ByFileMap
     = AU->getPreprocessedEntitiesByFile();
   if (ByFileMap.empty()) {
     // Build the mapping from files to sets of preprocessed entities.
-    for (PreprocessingRecord::iterator E = PPRec.begin(OnlyLocalDecls),
-                                    EEnd = PPRec.end(OnlyLocalDecls);
-         E != EEnd; ++E) {
+    for (PreprocessingRecord::iterator E = StartEntity; E != EndEntity; ++E) {
       std::pair<FileID, unsigned> P
         = SM.getDecomposedInstantiationLoc((*E)->getSourceRange().getBegin());
+      
       ByFileMap[P.first].push_back(*E);
     }
   }

@@ -879,7 +879,7 @@ def ext_enumerator_too_large : ExtWarn<
 def err_enumerator_wrapped : Error<
   "enumerator value %0 is not representable in the underlying type %1">;
 def err_enum_redeclare_type_mismatch : Error<
-  "enumeration redeclared with different underlying type">;
+  "enumeration redeclared with different underlying type %0 (was %1)">;
 def err_enum_redeclare_fixed_mismatch : Error<
   "enumeration previously declared with %select{non|}0fixed underlying type">;
 def err_enum_redeclare_scoped_mismatch : Error<
@@ -1006,13 +1006,13 @@ def warn_attribute_wrong_decl_type : Warning<
   "variable and function|function or method|parameter|"
   "parameter or Objective-C method |function, method or block|"
   "virtual method or class|function, method, or parameter|class|virtual method"
-  "|member}1 types">;
+  "|member|variable}1 types">;
 def err_attribute_wrong_decl_type : Error<
   "%0 attribute only applies to %select{function|union|"
   "variable and function|function or method|parameter|"
   "parameter or Objective-C method |function, method or block|"
   "virtual method or class|function, method, or parameter|class|virtual method"
-  "|member}1 types">;
+  "|member|variable}1 types">;
 def warn_function_attribute_wrong_type : Warning<
   "%0 only applies to function types; type here is %1">;
 def warn_gnu_inline_attribute_requires_inline : Warning<
@@ -3230,10 +3230,16 @@ def warn_ret_stack_addr : Warning<
   "address of stack memory associated with local variable %0 returned">;
 def warn_ret_stack_ref : Warning<
   "reference to stack memory associated with local variable %0 returned">;
+def warn_ret_local_temp_addr : Warning<
+  "returning address of local temporary object">;
+def warn_ret_local_temp_ref : Warning<
+  "returning reference to local temporary object">;
 def warn_ret_addr_label : Warning<
   "returning address of label, which is local">;
 def err_ret_local_block : Error<
   "returning block that lives on the local stack">;
+def note_ref_var_local_bind : Note<
+  "binding reference variable %0 here">;
 
 
 // For non-floating point, expressions of the form x == x or x != x

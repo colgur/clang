@@ -23,7 +23,7 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/System/Path.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Config/config.h"
 #ifdef _MSC_VER
   #define WIN32_LEAN_AND_MEAN 1
@@ -110,7 +110,6 @@ void InitHeaderSearch::AddPath(const llvm::Twine &Path,
 
   // Handle isysroot.
   if (Group == System && !IgnoreSysRoot && MappedPath.isAbsolute() &&
-      IncludeSysroot.isValid() &&
       IncludeSysroot != llvm::sys::Path::GetRootDirectory()) {
     MappedPathStorage.clear();
     MappedPathStr =
@@ -736,31 +735,33 @@ AddDefaultCPlusPlusIncludePaths(const llvm::Triple &triple) {
     AddGnuCPlusPlusIncludePaths(
       "/usr/lib/gcc/i686-pc-linux-gnu/4.1.2/include/g++-v4",
       "i686-pc-linux-gnu", "", "", triple);
-    // Gentoo amd64 stable
-    AddGnuCPlusPlusIncludePaths(
-        "/usr/lib/gcc/x86_64-pc-linux-gnu/4.1.2/include/g++-v4",
-        "i686-pc-linux-gnu", "", "", triple);
-        
-    // Gentoo amd64 gcc 4.3.2
-    AddGnuCPlusPlusIncludePaths(
-        "/usr/lib/gcc/x86_64-pc-linux-gnu/4.3.2/include/g++-v4",
-        "x86_64-pc-linux-gnu", "", "", triple);
-        
-    // Gentoo amd64 gcc 4.4.3
-    AddGnuCPlusPlusIncludePaths(
-        "/usr/lib/gcc/x86_64-pc-linux-gnu/4.4.3/include/g++-v4",
-        "x86_64-pc-linux-gnu", "32", "", triple);
 
+    // Gentoo amd64 gcc 4.4.5
+    AddGnuCPlusPlusIncludePaths(
+        "/usr/lib/gcc/x86_64-pc-linux-gnu/4.4.5/include/g++-v4",
+        "x86_64-pc-linux-gnu", "32", "", triple);
     // Gentoo amd64 gcc 4.4.4
     AddGnuCPlusPlusIncludePaths(
         "/usr/lib/gcc/x86_64-pc-linux-gnu/4.4.4/include/g++-v4",
         "x86_64-pc-linux-gnu", "32", "", triple);
+    // Gentoo amd64 gcc 4.4.3
+    AddGnuCPlusPlusIncludePaths(
+        "/usr/lib/gcc/x86_64-pc-linux-gnu/4.4.3/include/g++-v4",
+        "x86_64-pc-linux-gnu", "32", "", triple);
+    // Gentoo amd64 gcc 4.3.2
+    AddGnuCPlusPlusIncludePaths(
+        "/usr/lib/gcc/x86_64-pc-linux-gnu/4.3.2/include/g++-v4",
+        "x86_64-pc-linux-gnu", "", "", triple);
+    // Gentoo amd64 stable
+    AddGnuCPlusPlusIncludePaths(
+        "/usr/lib/gcc/x86_64-pc-linux-gnu/4.1.2/include/g++-v4",
+        "i686-pc-linux-gnu", "", "", triple);
 
     // Gentoo amd64 llvm-gcc trunk
     AddGnuCPlusPlusIncludePaths(
         "/usr/lib/llvm-gcc-4.2-9999/include/c++/4.2.1",
         "x86_64-pc-linux-gnu", "", "", triple);
-    
+
     break;
   case llvm::Triple::FreeBSD:
     // FreeBSD 8.0

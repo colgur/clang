@@ -16,7 +16,7 @@
 
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/Support/Allocator.h"
-#include "llvm/System/DataTypes.h"
+#include "llvm/Support/DataTypes.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/ADT/DenseMap.h"
@@ -452,6 +452,13 @@ public:
     return MainFileID;
   }
 
+  /// \brief Set the file ID for the precompiled preamble, which is also the
+  /// main file.
+  void SetPreambleFileID(FileID Preamble) {
+    assert(MainFileID.isInvalid() && "MainFileID already set!");
+    MainFileID = Preamble;
+  }
+  
   //===--------------------------------------------------------------------===//
   // Methods to create new FileID's and instantiations.
   //===--------------------------------------------------------------------===//

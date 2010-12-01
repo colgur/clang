@@ -145,14 +145,24 @@ static std::string GetStaticDeclName(CodeGenFunction &CGF, const VarDecl &D,
   }
   
   std::string ContextName;
-  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(CGF.CurFuncDecl)) {
+  if (!CGF.CurFuncDecl) {
+    // Better be in a block declared in global scope.
+    const NamedDecl *ND = cast<NamedDecl>(&D);
+    const DeclContext *DC = ND->getDeclContext();
+    if (const BlockDecl *BD = dyn_cast<BlockDecl>(DC)) {
+      MangleBuffer Name;
+      CGM.getMangledName(GlobalDecl(), Name, BD);
+      ContextName = Name.getString();
+    }
+    else
+      assert(0 && "Unknown context for block static var decl");
+  } else if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(CGF.CurFuncDecl)) {
     llvm::StringRef Name = CGM.getMangledName(FD);
     ContextName = Name.str();
   } else if (isa<ObjCMethodDecl>(CGF.CurFuncDecl))
     ContextName = CGF.CurFn->getName();
   else
-    // FIXME: What about in a block??
-    assert(0 && "Unknown context for block var decl");
+    assert(0 && "Unknown context for static var decl");
   
   return ContextName + Separator + D.getNameAsString();
 }
@@ -497,6 +507,54 @@ namespace {
   };
 }
 
+
+/// canEmitInitWithFewStoresAfterMemset - Decide whether we can emit the
+/// non-zero parts of the specified initializer with equal or fewer than
+/// NumStores scalar stores.
+static bool canEmitInitWithFewStoresAfterMemset(llvm::Constant *Init,
+                                                unsigned &NumStores) {
+  // Zero never requires any extra stores.
+  if (isa<llvm::ConstantAggregateZero>(Init)) return true;
+  
+  // Anything else is hard and scary.
+  return false;
+}
+
+/// emitStoresForInitAfterMemset - For inits that
+/// canEmitInitWithFewStoresAfterMemset returned true for, emit the scalar
+/// stores that would be required.
+static void emitStoresForInitAfterMemset(llvm::Constant *Init, llvm::Value *Loc,
+                                         CGBuilderTy &Builder) {
+  // Zero doesn't require any stores.
+  if (isa<llvm::ConstantAggregateZero>(Init)) return;
+  
+  
+  assert(0 && "Unknown value type!");
+}
+
+
+/// shouldUseMemSetPlusStoresToInitialize - Decide whether we should use memset
+/// plus some stores to initialize a local variable instead of using a memcpy
+/// from a constant global.  It is beneficial to use memset if the global is all
+/// zeros, or mostly zeros and large.
+static bool shouldUseMemSetPlusStoresToInitialize(llvm::Constant *Init,
+                                                  uint64_t GlobalSize) {
+  // If a global is all zeros, always use a memset.
+  if (isa<llvm::ConstantAggregateZero>(Init)) return true;
+
+
+  // If a non-zero global is <= 32 bytes, always use a memcpy.  If it is large,
+  // do it if it will require 6 or fewer scalar stores.
+  // TODO: Should budget depends on the size?  Avoiding a large global warrants
+  // plopping in more stores.
+  unsigned StoreBudget = 6;
+  uint64_t SizeLimit = 32;
+  
+  return GlobalSize > SizeLimit && 
+         canEmitInitWithFewStoresAfterMemset(Init, StoreBudget);
+}
+
+
 /// EmitLocalVarDecl - Emit code and set up an entry in LocalDeclMap for a
 /// variable declaration with auto, register, or no storage class specifier.
 /// These turn into simple stack objects, or GlobalValues depending on target.
@@ -548,9 +606,8 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
             // Create a flag that is used to indicate when the NRVO was applied
             // to this variable. Set it to zero to indicate that NRVO was not 
             // applied.
-            const llvm::Type *BoolTy = llvm::Type::getInt1Ty(VMContext);
-            llvm::Value *Zero = llvm::ConstantInt::get(BoolTy, 0);
-            NRVOFlag = CreateTempAlloca(BoolTy, "nrvo");            
+            llvm::Value *Zero = Builder.getFalse();
+            NRVOFlag = CreateTempAlloca(Zero->getType(), "nrvo");            
             Builder.CreateStore(Zero, NRVOFlag);
             
             // Record the NRVO flag for this variable.
@@ -671,21 +728,18 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
       flag |= BLOCK_FIELD_IS_WEAK;
 
     int isa = 0;
-    if (flag&BLOCK_FIELD_IS_WEAK)
+    if (flag & BLOCK_FIELD_IS_WEAK)
       isa = 1;
-    V = llvm::ConstantInt::get(Int32Ty, isa);
-    V = Builder.CreateIntToPtr(V, PtrToInt8Ty, "isa");
+    V = Builder.CreateIntToPtr(Builder.getInt32(isa), PtrToInt8Ty, "isa");
     Builder.CreateStore(V, isa_field);
 
     Builder.CreateStore(DeclPtr, forwarding_field);
 
-    V = llvm::ConstantInt::get(Int32Ty, flags);
-    Builder.CreateStore(V, flags_field);
+    Builder.CreateStore(Builder.getInt32(flags), flags_field);
 
     const llvm::Type *V1;
     V1 = cast<llvm::PointerType>(DeclPtr->getType())->getElementType();
-    V = llvm::ConstantInt::get(Int32Ty,
-                               CGM.GetTargetTypeStoreSize(V1).getQuantity());
+    V = Builder.getInt32(CGM.GetTargetTypeStoreSize(V1).getQuantity());
     Builder.CreateStore(V, size_field);
 
     if (flags & BLOCK_HAS_COPY_DISPOSE) {
@@ -718,27 +772,31 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
       llvm::Constant *Init = CGM.EmitConstantExpr(D.getInit(), Ty,this);
       assert(Init != 0 && "Wasn't a simple constant init?");
       
-      llvm::Value *AlignVal = 
-      llvm::ConstantInt::get(Int32Ty, Align.getQuantity());
-      const llvm::Type *IntPtr =
-      llvm::IntegerType::get(VMContext, LLVMPointerWidth);
+      llvm::Value *AlignVal = Builder.getInt32(Align.getQuantity());
       llvm::Value *SizeVal =
-      llvm::ConstantInt::get(IntPtr, 
+      llvm::ConstantInt::get(CGF.IntPtrTy, 
                              getContext().getTypeSizeInChars(Ty).getQuantity());
       
       const llvm::Type *BP = llvm::Type::getInt8PtrTy(VMContext);
       if (Loc->getType() != BP)
         Loc = Builder.CreateBitCast(Loc, BP, "tmp");
       
-      llvm::Value *NotVolatile =
-        llvm::ConstantInt::get(llvm::Type::getInt1Ty(VMContext), 0);
+      llvm::Value *NotVolatile = Builder.getFalse();
 
-      // If the initializer is all zeros, codegen with memset.
-      if (isa<llvm::ConstantAggregateZero>(Init)) {
-        llvm::Value *Zero =
-          llvm::ConstantInt::get(llvm::Type::getInt8Ty(VMContext), 0);
-        Builder.CreateCall5(CGM.getMemSetFn(Loc->getType(), SizeVal->getType()),
-                            Loc, Zero, SizeVal, AlignVal, NotVolatile);
+      // If the initializer is all or mostly zeros, codegen with memset then do
+      // a few stores afterward.
+      if (shouldUseMemSetPlusStoresToInitialize(Init, 
+                      CGM.getTargetData().getTypeAllocSize(Init->getType()))) {
+        const llvm::Type *BP = llvm::Type::getInt8PtrTy(VMContext);
+        llvm::Value *MemSetDest = Loc;
+        if (MemSetDest->getType() != BP)
+          MemSetDest = Builder.CreateBitCast(MemSetDest, BP, "tmp");
+        
+        Builder.CreateCall5(CGM.getMemSetFn(BP, SizeVal->getType()),
+                            MemSetDest, Builder.getInt8(0), SizeVal, AlignVal,
+                            NotVolatile);
+        emitStoresForInitAfterMemset(Init, Loc, Builder);
+        
       } else {
         // Otherwise, create a temporary global with the initializer then 
         // memcpy from the global to the alloca.
@@ -753,6 +811,10 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
         if (SrcPtr->getType() != BP)
           SrcPtr = Builder.CreateBitCast(SrcPtr, BP, "tmp");
 
+        const llvm::Type *BP = llvm::Type::getInt8PtrTy(VMContext);
+        if (Loc->getType() != BP)
+          Loc = Builder.CreateBitCast(Loc, BP, "tmp");
+        
         Builder.CreateCall5(CGM.getMemCpyFn(Loc->getType(), SrcPtr->getType(),
                                             SizeVal->getType()),
                             Loc, SrcPtr, SizeVal, AlignVal, NotVolatile);

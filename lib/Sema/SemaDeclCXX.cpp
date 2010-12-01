@@ -131,7 +131,7 @@ Sema::SetParamDefaultArgument(ParmVarDecl *Param, Expr *Arg,
                                                            EqualLoc);
   InitializationSequence InitSeq(*this, Entity, Kind, &Arg, 1);
   ExprResult Result = InitSeq.Perform(*this, Entity, Kind,
-                                            MultiExprArg(*this, &Arg, 1));
+                                      MultiExprArg(*this, &Arg, 1));
   if (Result.isInvalid())
     return true;
   Arg = Result.takeAs<Expr>();
@@ -3961,8 +3961,8 @@ bool Sema::CheckUsingDeclRedeclaration(SourceLocation UsingLoc,
   //   repeatedly where (and only where) multiple declarations are
   //   allowed.
   //
-  // That's in file contexts.
-  if (CurContext->isFileContext())
+  // That's in non-member contexts.
+  if (!CurContext->getRedeclContext()->isRecord())
     return false;
 
   NestedNameSpecifier *Qual

@@ -18,6 +18,7 @@ set(CLANG_TEST_DIRECTORIES
   "Preprocessor"
   "Rewriter"
   "Sema"
+  "SemaCUDA"
   "SemaCXX"
   "SemaObjC"
   "SemaObjCXX"
@@ -77,4 +78,14 @@ if(PYTHONINTERP_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/../utils/C++Tests
                 DEPENDS clang c-index-test FileCheck not count
                 COMMENT "Running Clang regression tests")
+
+  add_custom_target(check-all
+    COMMAND ${PYTHON_EXECUTABLE}
+                ${LLVM_SOURCE_DIR}/utils/lit/lit.py
+                --param build_config=${CMAKE_CFG_INTDIR}
+                --param build_mode=${RUNTIME_BUILD_MODE}
+                ${LIT_ARGS}
+                ${LLVM_BINARY_DIR}/test
+                ${CMAKE_CURRENT_BINARY_DIR}
+                COMMENT "Running Clang and LLVM regression tests")
 endif()

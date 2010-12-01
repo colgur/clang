@@ -32,10 +32,10 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Timer.h"
-#include "llvm/System/Host.h"
-#include "llvm/System/Path.h"
-#include "llvm/System/Program.h"
-#include "llvm/System/Signals.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Program.h"
+#include "llvm/Support/Signals.h"
 using namespace clang;
 
 CompilerInstance::CompilerInstance()
@@ -474,8 +474,11 @@ bool CompilerInstance::InitializeSourceManager(llvm::StringRef InputFile,
                                                FileManager &FileMgr,
                                                SourceManager &SourceMgr,
                                                const FrontendOptions &Opts) {
-  // Figure out where to get and map in the main file.
-  if (InputFile != "-") {
+  // Figure out where to get and map in the main file, unless it's already
+  // been created (e.g., by a precompiled preamble).
+  if (!SourceMgr.getMainFileID().isInvalid()) {
+    // Do nothing: the main file has already been set.
+  } else if (InputFile != "-") {
     const FileEntry *File = FileMgr.getFile(InputFile);
     if (!File) {
       Diags.Report(diag::err_fe_error_reading) << InputFile;

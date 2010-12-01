@@ -27,6 +27,7 @@
 #include "clang/Frontend/FrontendOptions.h"
 #include "clang/Frontend/Utils.h"
 #include "clang/Serialization/ASTReader.h"
+#include "clang/Serialization/ASTSerializationListener.h"
 #include "clang/Serialization/ASTWriter.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/Preprocessor.h"
@@ -35,8 +36,8 @@
 #include "clang/Basic/Diagnostic.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/System/Host.h"
-#include "llvm/System/Path.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Timer.h"
 #include <cstdlib>
@@ -637,10 +638,11 @@ public:
   }
 };
 
-class PrecompilePreambleConsumer : public PCHGenerator {
+class PrecompilePreambleConsumer : public PCHGenerator, 
+                                   public ASTSerializationListener {
   ASTUnit &Unit;
   std::vector<Decl *> TopLevelDecls;
-
+                                     
 public:
   PrecompilePreambleConsumer(ASTUnit &Unit,
                              const Preprocessor &PP, bool Chaining,
@@ -671,6 +673,15 @@ public:
         Unit.addTopLevelDeclFromPreamble(
                                       getWriter().getDeclID(TopLevelDecls[I]));
     }
+  }
+                                     
+  virtual void SerializedPreprocessedEntity(PreprocessedEntity *Entity,
+                                            uint64_t Offset) {
+    Unit.addPreprocessedEntityFromPreamble(Offset);
+  }
+                                     
+  virtual ASTSerializationListener *GetASTSerializationListener() {
+    return this;
   }
 };
 
@@ -757,6 +768,7 @@ bool ASTUnit::Parse(llvm::MemoryBuffer *OverrideMainBuffer) {
   
   // Clear out old caches and data.
   TopLevelDecls.clear();
+  PreprocessedEntities.clear();
   CleanTemporaryFiles();
   PreprocessedEntitiesByFile.clear();
 
@@ -765,6 +777,7 @@ bool ASTUnit::Parse(llvm::MemoryBuffer *OverrideMainBuffer) {
                     StoredDiagnostics.begin() + NumStoredDiagnosticsFromDriver,
                             StoredDiagnostics.end());
     TopLevelDeclsInPreamble.clear();
+    PreprocessedEntitiesInPreamble.clear();
   }
 
   // Create a file manager object to provide access to and cache the filesystem.
@@ -1237,6 +1250,8 @@ llvm::MemoryBuffer *ASTUnit::getMainBufferWithPrecompiledPreamble(
                           StoredDiagnostics.end());
   TopLevelDecls.clear();
   TopLevelDeclsInPreamble.clear();
+  PreprocessedEntities.clear();
+  PreprocessedEntitiesInPreamble.clear();
   
   // Create a file manager object to provide access to and cache the filesystem.
   Clang.setFileManager(new FileManager(Clang.getFileSystemOpts()));
@@ -1269,6 +1284,8 @@ llvm::MemoryBuffer *ASTUnit::getMainBufferWithPrecompiledPreamble(
     llvm::sys::Path(FrontendOpts.OutputFile).eraseFromDisk();
     Preamble.clear();
     TopLevelDeclsInPreamble.clear();
+    PreprocessedEntities.clear();
+    PreprocessedEntitiesInPreamble.clear();
     PreambleRebuildCounter = DefaultPreambleRebuildInterval;
     PreprocessorOpts.eraseRemappedFile(
                                PreprocessorOpts.remapped_file_buffer_end() - 1);
@@ -1319,6 +1336,55 @@ void ASTUnit::RealizeTopLevelDeclsFromPreamble() {
   }
   TopLevelDeclsInPreamble.clear();
   TopLevelDecls.insert(TopLevelDecls.begin(), Resolved.begin(), Resolved.end());
+}
+
+void ASTUnit::RealizePreprocessedEntitiesFromPreamble() {
+  if (!PP)
+    return;
+  
+  PreprocessingRecord *PPRec = PP->getPreprocessingRecord();
+  if (!PPRec)
+    return;
+  
+  ExternalPreprocessingRecordSource *External = PPRec->getExternalSource();
+  if (!External)
+    return;
+
+  for (unsigned I = 0, N = PreprocessedEntitiesInPreamble.size(); I != N; ++I) {
+    if (PreprocessedEntity *PE
+          = External->ReadPreprocessedEntity(PreprocessedEntitiesInPreamble[I]))
+      PreprocessedEntities.push_back(PE);
+  }
+  
+  if (PreprocessedEntities.empty())
+    return;
+  
+  PreprocessedEntities.insert(PreprocessedEntities.end(), 
+                              PPRec->begin(true), PPRec->end(true));
+}
+
+ASTUnit::pp_entity_iterator ASTUnit::pp_entity_begin() {
+  if (!PreprocessedEntitiesInPreamble.empty() &&
+      PreprocessedEntities.empty())
+    RealizePreprocessedEntitiesFromPreamble();
+  
+  if (PreprocessedEntities.empty())
+    if (PreprocessingRecord *PPRec = PP->getPreprocessingRecord())
+      return PPRec->begin(true);
+  
+  return PreprocessedEntities.begin();
+}
+
+ASTUnit::pp_entity_iterator ASTUnit::pp_entity_end() {
+  if (!PreprocessedEntitiesInPreamble.empty() &&
+      PreprocessedEntities.empty())
+    RealizePreprocessedEntitiesFromPreamble();
+  
+  if (PreprocessedEntities.empty())
+    if (PreprocessingRecord *PPRec = PP->getPreprocessingRecord())
+      return PPRec->end(true);
+  
+  return PreprocessedEntities.end();
 }
 
 unsigned ASTUnit::getMaxPCHLevel() const {
@@ -1841,11 +1907,12 @@ void ASTUnit::CodeComplete(llvm::StringRef File, unsigned Line, unsigned Column,
   
   // Use the code completion consumer we were given, but adding any cached
   // code-completion results.
-  AugmentedCodeCompleteConsumer 
-  AugmentedConsumer(*this, Consumer, FrontendOpts.ShowMacrosInCodeCompletion,
-                    FrontendOpts.ShowCodePatternsInCodeCompletion,
-                    FrontendOpts.ShowGlobalSymbolsInCodeCompletion);
-  Clang.setCodeCompletionConsumer(&AugmentedConsumer);
+  AugmentedCodeCompleteConsumer *AugmentedConsumer
+    = new AugmentedCodeCompleteConsumer(*this, Consumer, 
+                                        FrontendOpts.ShowMacrosInCodeCompletion,
+                                FrontendOpts.ShowCodePatternsInCodeCompletion,
+                                FrontendOpts.ShowGlobalSymbolsInCodeCompletion);
+  Clang.setCodeCompletionConsumer(AugmentedConsumer);
 
   // If we have a precompiled preamble, try to use it. We only allow
   // the use of the precompiled preamble if we're if the completion
@@ -1906,7 +1973,6 @@ void ASTUnit::CodeComplete(llvm::StringRef File, unsigned Line, unsigned Column,
   Clang.takeFileManager();
   Clang.takeSourceManager();
   Clang.takeInvocation();
-  Clang.takeCodeCompletionConsumer();
 }
 
 bool ASTUnit::Save(llvm::StringRef File) {
