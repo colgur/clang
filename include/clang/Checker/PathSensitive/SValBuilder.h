@@ -1,4 +1,4 @@
-//== ValueManager.h - Aggregate manager of symbols and SVals ----*- C++ -*--==//
+// SValBuilder.h - Construction of SVals from evaluating expressions -*- C++ -*-
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,60 +7,87 @@
 //
 //===----------------------------------------------------------------------===//
 //
-//  This file defines ValueManager, a class that manages symbolic values
-//  and SVals created for use by GRExprEngine and related classes.  It
-//  wraps and owns SymbolManager, MemRegionManager, and BasicValueFactory.
+//  This file defines SValBuilder, a class that defines the interface for
+//  "symbolical evaluators" which construct an SVal from an expression.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CLANG_ANALYSIS_AGGREGATE_VALUE_MANAGER_H
-#define LLVM_CLANG_ANALYSIS_AGGREGATE_VALUE_MANAGER_H
+#ifndef LLVM_CLANG_ANALYSIS_SVALBUILDER
+#define LLVM_CLANG_ANALYSIS_SVALBUILDER
 
-#include "llvm/ADT/OwningPtr.h"
-#include "clang/Checker/PathSensitive/MemRegion.h"
+#include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/Checker/PathSensitive/SVals.h"
 #include "clang/Checker/PathSensitive/BasicValueFactory.h"
-#include "clang/Checker/PathSensitive/SymbolManager.h"
-#include "clang/Checker/PathSensitive/SValuator.h"
-#include "clang/AST/ExprCXX.h"
-
-namespace llvm { class BumpPtrAllocator; }
+#include "clang/Checker/PathSensitive/MemRegion.h"
 
 namespace clang {
 
-class GRStateManager;
+class GRState;
 
-class ValueManager {
-
+class SValBuilder {
+protected:
   ASTContext &Context;
+  
+  /// Manager of APSInt values.
   BasicValueFactory BasicVals;
 
-  /// SymMgr - Object that manages the symbol information.
+  /// Manages the creation of symbols.
   SymbolManager SymMgr;
 
-  /// SVator - SValuator object that creates SVals from expressions.
-  llvm::OwningPtr<SValuator> SVator;
-
+  /// Manages the creation of memory regions.
   MemRegionManager MemMgr;
 
   GRStateManager &StateMgr;
 
+  /// The scalar type to use for array indices.
   const QualType ArrayIndexTy;
+  
+  /// The width of the scalar type used for array indices.
   const unsigned ArrayIndexWidth;
 
 public:
-  ValueManager(llvm::BumpPtrAllocator &alloc, ASTContext &context,
-               GRStateManager &stateMgr)
-               : Context(context), BasicVals(context, alloc),
-                 SymMgr(context, BasicVals, alloc),
-                 MemMgr(context, alloc), StateMgr(stateMgr),
-                 ArrayIndexTy(context.IntTy),
-                 ArrayIndexWidth(context.getTypeSize(ArrayIndexTy)) {
-    // FIXME: Generalize later.
-    SVator.reset(clang::CreateSimpleSValuator(*this));
-  }
+  // FIXME: Make these protected again one RegionStoreManager correctly
+  // handles loads from differening bound value types.
+  virtual SVal evalCastNL(NonLoc val, QualType castTy) = 0;
+  virtual SVal evalCastL(Loc val, QualType castTy) = 0;
 
-  // Accessors to submanagers.
+public:
+  SValBuilder(llvm::BumpPtrAllocator &alloc, ASTContext &context,
+              GRStateManager &stateMgr)
+    : Context(context), BasicVals(context, alloc),
+      SymMgr(context, BasicVals, alloc),
+      MemMgr(context, alloc),
+      StateMgr(stateMgr),
+      ArrayIndexTy(context.IntTy),
+      ArrayIndexWidth(context.getTypeSize(ArrayIndexTy)) {}
+
+  virtual ~SValBuilder() {}
+
+  SVal evalCast(SVal V, QualType castTy, QualType originalType);
+  
+  virtual SVal evalMinus(NonLoc val) = 0;
+
+  virtual SVal evalComplement(NonLoc val) = 0;
+
+  virtual SVal evalBinOpNN(const GRState *state, BinaryOperator::Opcode Op,
+                           NonLoc lhs, NonLoc rhs, QualType resultTy) = 0;
+
+  virtual SVal evalBinOpLL(const GRState *state, BinaryOperator::Opcode Op,
+                           Loc lhs, Loc rhs, QualType resultTy) = 0;
+
+  virtual SVal evalBinOpLN(const GRState *state, BinaryOperator::Opcode Op,
+                           Loc lhs, NonLoc rhs, QualType resultTy) = 0;
+
+  /// getKnownValue - evaluates a given SVal. If the SVal has only one possible
+  ///  (integer) value, that value is returned. Otherwise, returns NULL.
+  virtual const llvm::APSInt *getKnownValue(const GRState *state, SVal V) = 0;
+  
+  SVal evalBinOp(const GRState *ST, BinaryOperator::Opcode Op,
+                 SVal L, SVal R, QualType T);
+  
+  DefinedOrUnknownSVal evalEQ(const GRState *ST, DefinedOrUnknownSVal L,
+                              DefinedOrUnknownSVal R);
 
   ASTContext &getContext() { return Context; }
   const ASTContext &getContext() const { return Context; }
@@ -72,8 +99,6 @@ public:
 
   SymbolManager &getSymbolManager() { return SymMgr; }
   const SymbolManager &getSymbolManager() const { return SymMgr; }
-
-  SValuator &getSValuator() { return *SVator.get(); }
 
   MemRegionManager &getRegionManager() { return MemMgr; }
   const MemRegionManager &getRegionManager() const { return MemMgr; }
@@ -210,7 +235,12 @@ public:
   Loc makeLoc(const llvm::APSInt& V) {
     return loc::ConcreteInt(BasicVals.getValue(V));
   }
+
 };
+
+SValBuilder* createSimpleSValBuilder(llvm::BumpPtrAllocator &alloc,
+                                     ASTContext &context,
+                                     GRStateManager &stateMgr);
+
 } // end clang namespace
 #endif
-

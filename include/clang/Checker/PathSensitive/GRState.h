@@ -17,7 +17,7 @@
 #include "clang/Checker/PathSensitive/ConstraintManager.h"
 #include "clang/Checker/PathSensitive/Environment.h"
 #include "clang/Checker/PathSensitive/Store.h"
-#include "clang/Checker/PathSensitive/ValueManager.h"
+#include "clang/Checker/PathSensitive/SValBuilder.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/ImmutableMap.h"
 #include "llvm/Support/Casting.h"
@@ -156,30 +156,30 @@ public:
   // could satisfy all the constraints).  This is the principal mechanism
   // for modeling path-sensitivity in GRExprEngine/GRState.
   //
-  // Various "Assume" methods form the interface for adding constraints to
-  // symbolic values.  A call to "Assume" indicates an assumption being placed
-  // on one or symbolic values.  Assume methods take the following inputs:
+  // Various "assume" methods form the interface for adding constraints to
+  // symbolic values.  A call to 'assume' indicates an assumption being placed
+  // on one or symbolic values.  'assume' methods take the following inputs:
   //
   //  (1) A GRState object representing the current state.
   //
-  //  (2) The assumed constraint (which is specific to a given "Assume" method).
+  //  (2) The assumed constraint (which is specific to a given "assume" method).
   //
   //  (3) A binary value "Assumption" that indicates whether the constraint is
   //      assumed to be true or false.
   //
-  // The output of "Assume*" is a new GRState object with the added constraints.
+  // The output of "assume*" is a new GRState object with the added constraints.
   // If no new state is feasible, NULL is returned.
   //
 
-  const GRState *Assume(DefinedOrUnknownSVal cond, bool assumption) const;
+  const GRState *assume(DefinedOrUnknownSVal cond, bool assumption) const;
 
   /// This method assumes both "true" and "false" for 'cond', and
   ///  returns both corresponding states.  It's shorthand for doing
-  ///  'Assume' twice.
+  ///  'assume' twice.
   std::pair<const GRState*, const GRState*>
-  Assume(DefinedOrUnknownSVal cond) const;
+  assume(DefinedOrUnknownSVal cond) const;
 
-  const GRState *AssumeInBound(DefinedOrUnknownSVal idx,
+  const GRState *assumeInBound(DefinedOrUnknownSVal idx,
                                DefinedOrUnknownSVal upperBound,
                                bool assumption) const;
 
@@ -426,8 +426,8 @@ private:
   ///  a particular function.  This is used to unique states.
   llvm::FoldingSet<GRState> StateSet;
 
-  /// ValueMgr - Object that manages the data for all created SVals.
-  ValueManager ValueMgr;
+  /// Object that manages the data for all created SVals.
+  llvm::OwningPtr<SValBuilder> svalBuilder;
 
   /// Alloc - A BumpPtrAllocator to allocate states.
   llvm::BumpPtrAllocator &Alloc;
@@ -441,7 +441,7 @@ public:
     : Eng(subeng),
       EnvMgr(alloc),
       GDMFactory(alloc),
-      ValueMgr(alloc, Ctx, *this),
+      svalBuilder(createSimpleSValBuilder(alloc, Ctx, *this)),
       Alloc(alloc) {
     StoreMgr.reset((*CreateStoreManager)(*this));
     ConstraintMgr.reset((*CreateConstraintManager)(*this, subeng));
@@ -451,33 +451,34 @@ public:
 
   const GRState *getInitialState(const LocationContext *InitLoc);
 
-  ASTContext &getContext() { return ValueMgr.getContext(); }
-  const ASTContext &getContext() const { return ValueMgr.getContext(); }
+  ASTContext &getContext() { return svalBuilder->getContext(); }
+  const ASTContext &getContext() const { return svalBuilder->getContext(); }
 
   BasicValueFactory &getBasicVals() {
-    return ValueMgr.getBasicValueFactory();
+    return svalBuilder->getBasicValueFactory();
   }
   const BasicValueFactory& getBasicVals() const {
-    return ValueMgr.getBasicValueFactory();
+    return svalBuilder->getBasicValueFactory();
+  }
+
+  SValBuilder &getSValBuilder() {
+    return *svalBuilder;
   }
 
   SymbolManager &getSymbolManager() {
-    return ValueMgr.getSymbolManager();
+    return svalBuilder->getSymbolManager();
   }
   const SymbolManager &getSymbolManager() const {
-    return ValueMgr.getSymbolManager();
+    return svalBuilder->getSymbolManager();
   }
-
-  ValueManager &getValueManager() { return ValueMgr; }
-  const ValueManager &getValueManager() const { return ValueMgr; }
 
   llvm::BumpPtrAllocator& getAllocator() { return Alloc; }
 
   MemRegionManager& getRegionManager() {
-    return ValueMgr.getRegionManager();
+    return svalBuilder->getRegionManager();
   }
   const MemRegionManager& getRegionManager() const {
-    return ValueMgr.getRegionManager();
+    return svalBuilder->getRegionManager();
   }
 
   StoreManager& getStoreManager() { return *StoreMgr; }
@@ -603,21 +604,21 @@ inline const VarRegion* GRState::getRegion(const VarDecl *D,
   return getStateManager().getRegionManager().getVarRegion(D, LC);
 }
 
-inline const GRState *GRState::Assume(DefinedOrUnknownSVal Cond,
+inline const GRState *GRState::assume(DefinedOrUnknownSVal Cond,
                                       bool Assumption) const {
   if (Cond.isUnknown())
     return this;
   
-  return getStateManager().ConstraintMgr->Assume(this, cast<DefinedSVal>(Cond),
+  return getStateManager().ConstraintMgr->assume(this, cast<DefinedSVal>(Cond),
                                                  Assumption);
 }
   
 inline std::pair<const GRState*, const GRState*>
-GRState::Assume(DefinedOrUnknownSVal Cond) const {
+GRState::assume(DefinedOrUnknownSVal Cond) const {
   if (Cond.isUnknown())
     return std::make_pair(this, this);
   
-  return getStateManager().ConstraintMgr->AssumeDual(this,
+  return getStateManager().ConstraintMgr->assumeDual(this,
                                                      cast<DefinedSVal>(Cond));
 }
 
@@ -658,7 +659,7 @@ inline const llvm::APSInt *GRState::getSymVal(SymbolRef sym) const {
 }
 
 inline SVal GRState::getSVal(const Stmt* Ex) const {
-  return Env.GetSVal(Ex, getStateManager().ValueMgr);
+  return Env.getSVal(Ex, *getStateManager().svalBuilder);
 }
 
 inline SVal GRState::getSValAsScalarOrLoc(const Stmt *S) const {

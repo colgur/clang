@@ -1732,7 +1732,7 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
       }    
       else
         assert(0 && "Unknown conversion function kind!");
-      // Whatch out for elipsis conversion.
+      // Watch out for elipsis conversion.
       if (!ICS.UserDefined.EllipsisConversion) {
         if (PerformImplicitConversion(From, BeforeToType, 
                                       ICS.UserDefined.Before, AA_Converting,
@@ -1925,7 +1925,7 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
     break;
 
   case ICK_Pointer_Conversion: {
-    if (SCS.IncompatibleObjC) {
+    if (SCS.IncompatibleObjC && Action != AA_Casting) {
       // Diagnose incompatible Objective-C conversions
       Diag(From->getSourceRange().getBegin(),
            diag::ext_typecheck_convert_incompatible_pointer)
@@ -3514,6 +3514,18 @@ ExprResult Sema::ActOnNoexceptExpr(SourceLocation KeyLoc, SourceLocation,
 
 ExprResult Sema::ActOnFinishFullExpr(Expr *FullExpr) {
   if (!FullExpr) return ExprError();
+
+  // C99 6.3.2.1:
+  //   [Except in specific positions,] an lvalue that does not have
+  //   array type is converted to the value stored in the
+  //   designated object (and is no longer an lvalue).
+  // This rule does not apply in C++;  however, in ObjC++, we do want
+  // to do lvalue-to-rvalue conversion on top-level ObjCProperty
+  // l-values.
+  if (!FullExpr->isRValue() &&
+      (!getLangOptions().CPlusPlus ||
+       FullExpr->getObjectKind() == OK_ObjCProperty))
+    DefaultFunctionArrayLvalueConversion(FullExpr);
 
   CheckImplicitConversions(FullExpr);
   return MaybeCreateCXXExprWithTemporaries(FullExpr);

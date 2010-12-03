@@ -1460,7 +1460,6 @@ public:
   LValue EmitObjCMessageExprLValue(const ObjCMessageExpr *E);
   LValue EmitObjCIvarRefLValue(const ObjCIvarRefExpr *E);
   LValue EmitObjCPropertyRefLValue(const ObjCPropertyRefExpr *E);
-  LValue EmitObjCKVCRefLValue(const ObjCImplicitSetterGetterRefExpr *E);
   LValue EmitStmtExprLValue(const StmtExpr *E);
   LValue EmitPointerToDataMemberBinaryExpr(const BinaryOperator *E);
   LValue EmitObjCSelectorLValue(const ObjCSelectorExpr *E);
@@ -1545,11 +1544,11 @@ public:
   llvm::Value *EmitObjCSelectorExpr(const ObjCSelectorExpr *E);
   RValue EmitObjCMessageExpr(const ObjCMessageExpr *E,
                              ReturnValueSlot Return = ReturnValueSlot());
-  RValue EmitObjCPropertyGet(const Expr *E,
+  RValue EmitObjCPropertyGet(const ObjCPropertyRefExpr *E,
                              ReturnValueSlot Return = ReturnValueSlot());
   RValue EmitObjCSuperPropertyGet(const Expr *Exp, const Selector &S,
                                   ReturnValueSlot Return = ReturnValueSlot());
-  void EmitObjCPropertySet(const Expr *E, RValue Src);
+  void EmitObjCPropertySet(const ObjCPropertyRefExpr *E, RValue Src);
   void EmitObjCSuperPropertySet(const Expr *E, const Selector &S, RValue Src);
 
 
@@ -1660,11 +1659,10 @@ public:
   void EmitCXXConstructExpr(const CXXConstructExpr *E, AggValueSlot Dest);
   
   void EmitSynthesizedCXXCopyCtor(llvm::Value *Dest, llvm::Value *Src,
-                                  const BlockDeclRefExpr *BDRE);
+                                  const Expr *Exp);
 
   RValue EmitCXXExprWithTemporaries(const CXXExprWithTemporaries *E,
-                                    AggValueSlot Slot
-                                      = AggValueSlot::ignored());
+                                    AggValueSlot Slot =AggValueSlot::ignored());
 
   void EmitCXXThrowExpr(const CXXThrowExpr *E);
 

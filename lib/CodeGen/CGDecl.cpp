@@ -291,8 +291,7 @@ void CodeGenFunction::EmitStaticVarDecl(const VarDecl &D,
   // FIXME: It is really dangerous to store this in the map; if anyone
   // RAUW's the GV uses of this constant will be invalid.
   const llvm::Type *LTy = CGM.getTypes().ConvertTypeForMem(D.getType());
-  const llvm::Type *LPtrTy =
-    llvm::PointerType::get(LTy, D.getType().getAddressSpace());
+  const llvm::Type *LPtrTy = LTy->getPointerTo(D.getType().getAddressSpace());
   DMEntry = llvm::ConstantExpr::getBitCast(GV, LPtrTy);
 
   // Emit global variable debug descriptor for static vars.
@@ -513,8 +512,25 @@ namespace {
 /// NumStores scalar stores.
 static bool canEmitInitWithFewStoresAfterMemset(llvm::Constant *Init,
                                                 unsigned &NumStores) {
-  // Zero never requires any extra stores.
-  if (isa<llvm::ConstantAggregateZero>(Init)) return true;
+  // Zero and Undef never requires any extra stores.
+  if (isa<llvm::ConstantAggregateZero>(Init) ||
+      isa<llvm::ConstantPointerNull>(Init) ||
+      isa<llvm::UndefValue>(Init))
+    return true;
+  if (isa<llvm::ConstantInt>(Init) || isa<llvm::ConstantFP>(Init) ||
+      isa<llvm::ConstantVector>(Init) || isa<llvm::BlockAddress>(Init) ||
+      isa<llvm::ConstantExpr>(Init))
+    return Init->isNullValue() || NumStores--;
+
+  // See if we can emit each element.
+  if (isa<llvm::ConstantArray>(Init) || isa<llvm::ConstantStruct>(Init)) {
+    for (unsigned i = 0, e = Init->getNumOperands(); i != e; ++i) {
+      llvm::Constant *Elt = cast<llvm::Constant>(Init->getOperand(i));
+      if (!canEmitInitWithFewStoresAfterMemset(Elt, NumStores))
+        return false;
+    }
+    return true;
+  }
   
   // Anything else is hard and scary.
   return false;
@@ -526,10 +542,30 @@ static bool canEmitInitWithFewStoresAfterMemset(llvm::Constant *Init,
 static void emitStoresForInitAfterMemset(llvm::Constant *Init, llvm::Value *Loc,
                                          CGBuilderTy &Builder) {
   // Zero doesn't require any stores.
-  if (isa<llvm::ConstantAggregateZero>(Init)) return;
+  if (isa<llvm::ConstantAggregateZero>(Init) ||
+      isa<llvm::ConstantPointerNull>(Init) ||
+      isa<llvm::UndefValue>(Init))
+    return;
   
+  if (isa<llvm::ConstantInt>(Init) || isa<llvm::ConstantFP>(Init) ||
+      isa<llvm::ConstantVector>(Init) || isa<llvm::BlockAddress>(Init) ||
+      isa<llvm::ConstantExpr>(Init)) {
+    if (!Init->isNullValue())
+      Builder.CreateStore(Init, Loc);
+    return;
+  }
   
-  assert(0 && "Unknown value type!");
+  assert((isa<llvm::ConstantStruct>(Init) || isa<llvm::ConstantArray>(Init)) &&
+         "Unknown value type!");
+  
+  for (unsigned i = 0, e = Init->getNumOperands(); i != e; ++i) {
+    llvm::Constant *Elt = cast<llvm::Constant>(Init->getOperand(i));
+    if (Elt->isNullValue()) continue;
+    
+    // Otherwise, get a pointer to the element and emit it.
+    emitStoresForInitAfterMemset(Elt, Builder.CreateConstGEP2_32(Loc, 0, i),
+                                 Builder);
+  }
 }
 
 
@@ -660,8 +696,7 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
 
     // Get the element type.
     const llvm::Type *LElemTy = ConvertTypeForMem(Ty);
-    const llvm::Type *LElemPtrTy =
-      llvm::PointerType::get(LElemTy, Ty.getAddressSpace());
+    const llvm::Type *LElemPtrTy = LElemTy->getPointerTo(Ty.getAddressSpace());
 
     llvm::Value *VLASize = EmitVLASize(Ty);
 
@@ -721,6 +756,9 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
                Ty->isObjCObjectPointerType()) {
       flag |= BLOCK_FIELD_IS_OBJECT;
       flags |= BLOCK_HAS_COPY_DISPOSE;
+    } else if (getContext().getBlockVarCopyInits(&D)) {
+        flag |= BLOCK_HAS_CXX_OBJ;
+        flags |= BLOCK_HAS_COPY_DISPOSE;
     }
 
     // FIXME: Someone double check this.
@@ -746,12 +784,12 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
       SynthesizeCopyDisposeHelpers = true;
       llvm::Value *copy_helper = Builder.CreateStructGEP(DeclPtr, 4);
       Builder.CreateStore(BuildbyrefCopyHelper(DeclPtr->getType(), flag, 
-                                               Align.getQuantity()),
+                                               Align.getQuantity(), &D),
                           copy_helper);
 
       llvm::Value *destroy_helper = Builder.CreateStructGEP(DeclPtr, 5);
       Builder.CreateStore(BuildbyrefDestroyHelper(DeclPtr->getType(), flag,
-                                                  Align.getQuantity()),
+                                                  Align.getQuantity(), &D),
                           destroy_helper);
     }
   }
@@ -788,14 +826,14 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
       if (shouldUseMemSetPlusStoresToInitialize(Init, 
                       CGM.getTargetData().getTypeAllocSize(Init->getType()))) {
         const llvm::Type *BP = llvm::Type::getInt8PtrTy(VMContext);
-        llvm::Value *MemSetDest = Loc;
-        if (MemSetDest->getType() != BP)
-          MemSetDest = Builder.CreateBitCast(MemSetDest, BP, "tmp");
         
         Builder.CreateCall5(CGM.getMemSetFn(BP, SizeVal->getType()),
-                            MemSetDest, Builder.getInt8(0), SizeVal, AlignVal,
+                            Loc, Builder.getInt8(0), SizeVal, AlignVal,
                             NotVolatile);
-        emitStoresForInitAfterMemset(Init, Loc, Builder);
+        if (!Init->isNullValue()) {
+          Loc = Builder.CreateBitCast(Loc, Init->getType()->getPointerTo());
+          emitStoresForInitAfterMemset(Init, Loc, Builder);
+        }
         
       } else {
         // Otherwise, create a temporary global with the initializer then 
@@ -811,10 +849,6 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
         if (SrcPtr->getType() != BP)
           SrcPtr = Builder.CreateBitCast(SrcPtr, BP, "tmp");
 
-        const llvm::Type *BP = llvm::Type::getInt8PtrTy(VMContext);
-        if (Loc->getType() != BP)
-          Loc = Builder.CreateBitCast(Loc, BP, "tmp");
-        
         Builder.CreateCall5(CGM.getMemCpyFn(Loc->getType(), SrcPtr->getType(),
                                             SizeVal->getType()),
                             Loc, SrcPtr, SizeVal, AlignVal, NotVolatile);
@@ -828,7 +862,7 @@ void CodeGenFunction::EmitAutoVarDecl(const VarDecl &D,
     } else if (Init->getType()->isAnyComplexType()) {
       EmitComplexExprIntoAddr(Init, Loc, isVolatile);
     } else {
-      EmitAggExpr(Init, AggValueSlot::forAddr(Loc, isVolatile, true));
+      EmitAggExpr(Init, AggValueSlot::forAddr(Loc, isVolatile, true, false));
     }
   }
 
