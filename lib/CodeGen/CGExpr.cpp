@@ -78,6 +78,16 @@ llvm::Value *CodeGenFunction::EvaluateExprAsBool(const Expr *E) {
   return EmitComplexToScalarConversion(EmitComplexExpr(E), E->getType(),BoolTy);
 }
 
+/// EmitIgnoredExpr - Emit code to compute the specified expression,
+/// ignoring the result.
+void CodeGenFunction::EmitIgnoredExpr(const Expr *E) {
+  if (E->isRValue())
+    return (void) EmitAnyExpr(E, AggValueSlot::ignored(), true);
+
+  // Just emit it as an l-value and drop the result.
+  EmitLValue(E);
+}
+
 /// EmitAnyExpr - Emit code to compute the specified expression which
 /// can have any type.  The result is returned as an RValue struct.
 /// If this is an aggregate expression, AggSlot indicates where the
@@ -195,15 +205,6 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
   if (E->isLValue()) {
     // Emit the expression as an lvalue.
     LValue LV = CGF.EmitLValue(E);
-    if (LV.isPropertyRef() || LV.isKVCRef()) {
-      QualType QT = E->getType();
-      RValue RV = 
-        LV.isPropertyRef() ? CGF.EmitLoadOfPropertyRefLValue(LV, QT) 
-                           : CGF.EmitLoadOfKVCRefLValue(LV, QT);
-      assert(RV.isScalar() && "EmitExprForReferenceBinding");
-      return RV.getScalarVal();
-    }
-    
     if (LV.isSimple())
       return LV.getAddress();
     
@@ -509,7 +510,9 @@ LValue CodeGenFunction::EmitLValue(const Expr *E) {
   case Expr::BinaryOperatorClass:
     return EmitBinaryOperatorLValue(cast<BinaryOperator>(E));
   case Expr::CompoundAssignOperatorClass:
-    return EmitCompoundAssignOperatorLValue(cast<CompoundAssignOperator>(E));
+    if (!E->getType()->isAnyComplexType())
+      return EmitCompoundAssignmentLValue(cast<CompoundAssignOperator>(E));
+    return EmitComplexCompoundAssignmentLValue(cast<CompoundAssignOperator>(E));
   case Expr::CallExprClass:
   case Expr::CXXMemberCallExprClass:
   case Expr::CXXOperatorCallExprClass:
@@ -671,11 +674,8 @@ RValue CodeGenFunction::EmitLoadOfLValue(LValue LV, QualType ExprType) {
   if (LV.isBitField())
     return EmitLoadOfBitfieldLValue(LV, ExprType);
 
-  if (LV.isPropertyRef())
-    return EmitLoadOfPropertyRefLValue(LV, ExprType);
-
-  assert(LV.isKVCRef() && "Unknown LValue type!");
-  return EmitLoadOfKVCRefLValue(LV, ExprType);
+  assert(LV.isPropertyRef() && "Unknown LValue type!");
+  return EmitLoadOfPropertyRefLValue(LV);
 }
 
 RValue CodeGenFunction::EmitLoadOfBitfieldLValue(LValue LV,
@@ -750,16 +750,6 @@ RValue CodeGenFunction::EmitLoadOfBitfieldLValue(LValue LV,
   return RValue::get(Res);
 }
 
-RValue CodeGenFunction::EmitLoadOfPropertyRefLValue(LValue LV,
-                                                    QualType ExprType) {
-  return EmitObjCPropertyGet(LV.getPropertyRefExpr());
-}
-
-RValue CodeGenFunction::EmitLoadOfKVCRefLValue(LValue LV,
-                                               QualType ExprType) {
-  return EmitObjCPropertyGet(LV.getKVCRefExpr());
-}
-
 // If this is a reference to a subset of the elements of a vector, create an
 // appropriate shufflevector.
 RValue CodeGenFunction::EmitLoadOfExtVectorElementLValue(LValue LV,
@@ -820,11 +810,8 @@ void CodeGenFunction::EmitStoreThroughLValue(RValue Src, LValue Dst,
     if (Dst.isBitField())
       return EmitStoreThroughBitfieldLValue(Src, Dst, Ty);
 
-    if (Dst.isPropertyRef())
-      return EmitStoreThroughPropertyRefLValue(Src, Dst, Ty);
-
-    assert(Dst.isKVCRef() && "Unknown LValue type");
-    return EmitStoreThroughKVCRefLValue(Src, Dst, Ty);
+    assert(Dst.isPropertyRef() && "Unknown LValue type");
+    return EmitStoreThroughPropertyRefLValue(Src, Dst);
   }
 
   if (Dst.isObjCWeak() && !Dst.isNonGC()) {
@@ -967,18 +954,6 @@ void CodeGenFunction::EmitStoreThroughBitfieldLValue(RValue Src, LValue Dst,
     if (AI.AccessAlignment)
       Store->setAlignment(AI.AccessAlignment);
   }
-}
-
-void CodeGenFunction::EmitStoreThroughPropertyRefLValue(RValue Src,
-                                                        LValue Dst,
-                                                        QualType Ty) {
-  EmitObjCPropertySet(Dst.getPropertyRefExpr(), Src);
-}
-
-void CodeGenFunction::EmitStoreThroughKVCRefLValue(RValue Src,
-                                                   LValue Dst,
-                                                   QualType Ty) {
-  EmitObjCPropertySet(Dst.getKVCRefExpr(), Src);
 }
 
 void CodeGenFunction::EmitStoreThroughExtVectorComponentLValue(RValue Src,
@@ -1264,9 +1239,22 @@ LValue CodeGenFunction::EmitUnaryOpLValue(const UnaryOperator *E) {
   case UO_Real:
   case UO_Imag: {
     LValue LV = EmitLValue(E->getSubExpr());
+    assert(LV.isSimple() && "real/imag on non-ordinary l-value");
+    llvm::Value *Addr = LV.getAddress();
+
+    // real and imag are valid on scalars.  This is a faster way of
+    // testing that.
+    if (!cast<llvm::PointerType>(Addr->getType())
+           ->getElementType()->isStructTy()) {
+      assert(E->getSubExpr()->getType()->isArithmeticType());
+      return LV;
+    }
+
+    assert(E->getSubExpr()->getType()->isAnyComplexType());
+
     unsigned Idx = E->getOpcode() == UO_Imag;
     return MakeAddrLValue(Builder.CreateStructGEP(LV.getAddress(),
-                                                    Idx, "idx"),
+                                                  Idx, "idx"),
                           ExprTy);
   }
   case UO_PreInc:
@@ -1567,11 +1555,6 @@ LValue CodeGenFunction::EmitMemberExpr(const MemberExpr *E) {
     const PointerType *PTy =
       BaseExpr->getType()->getAs<PointerType>();
     BaseQuals = PTy->getPointeeType().getQualifiers();
-  } else if (ObjCPropertyRefExpr *PRE
-               = dyn_cast<ObjCPropertyRefExpr>(BaseExpr->IgnoreParens())) {
-    RValue RV = EmitObjCPropertyGet(PRE);
-    BaseValue = RV.getAggregateAddr();
-    BaseQuals = BaseExpr->getType().getQualifiers();
   } else {
     LValue BaseLV = EmitLValue(BaseExpr);
     if (BaseLV.isNonGC())
@@ -1616,23 +1599,13 @@ LValue CodeGenFunction::EmitLValueForBitfield(llvm::Value *BaseValue,
 /// that the base value is a pointer to the enclosing record, derive
 /// an lvalue for the ultimate field.
 LValue CodeGenFunction::EmitLValueForAnonRecordField(llvm::Value *BaseValue,
-                                                     const FieldDecl *Field,
+                                             const IndirectFieldDecl *Field,
                                                      unsigned CVRQualifiers) {
-  llvm::SmallVector<const FieldDecl *, 8> Path;
-  Path.push_back(Field);
-
-  while (Field->getParent()->isAnonymousStructOrUnion()) {
-    const ValueDecl *VD = Field->getParent()->getAnonymousStructOrUnionObject();
-    if (!isa<FieldDecl>(VD)) break;
-    Field = cast<FieldDecl>(VD);
-    Path.push_back(Field);
-  }
-
-  llvm::SmallVectorImpl<const FieldDecl*>::reverse_iterator
-    I = Path.rbegin(), E = Path.rend();
+  IndirectFieldDecl::chain_iterator I = Field->chain_begin(),
+    IEnd = Field->chain_end();
   while (true) {
-    LValue LV = EmitLValueForField(BaseValue, *I, CVRQualifiers);
-    if (++I == E) return LV;
+    LValue LV = EmitLValueForField(BaseValue, cast<FieldDecl>(*I), CVRQualifiers);
+    if (++I == IEnd) return LV;
 
     assert(LV.isSimple());
     BaseValue = LV.getAddress();
@@ -1785,20 +1758,24 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
   case CK_Dependent:
     llvm_unreachable("dependent cast kind in IR gen!");
 
-  case CK_NoOp:
-    if (!E->getSubExpr()->isRValue() || E->getType()->isRecordType()) {
-      LValue LV = EmitLValue(E->getSubExpr());
-      if (LV.isPropertyRef() || LV.isKVCRef()) {
-        QualType QT = E->getSubExpr()->getType();
-        RValue RV = 
-          LV.isPropertyRef() ? EmitLoadOfPropertyRefLValue(LV, QT) 
-                             : EmitLoadOfKVCRefLValue(LV, QT);
-        assert(RV.isAggregate());
-        llvm::Value *V = RV.getAggregateAddr();
-        return MakeAddrLValue(V, QT);
-      }
-      return LV;
+  case CK_GetObjCProperty: {
+    LValue LV = EmitLValue(E->getSubExpr());
+    assert(LV.isPropertyRef());
+    RValue RV = EmitLoadOfPropertyRefLValue(LV);
+
+    // Property is an aggregate r-value.
+    if (RV.isAggregate()) {
+      return MakeAddrLValue(RV.getAggregateAddr(), E->getType());
     }
+
+    // Implicit property returns an l-value.
+    assert(RV.isScalar());
+    return MakeAddrLValue(RV.getScalarVal(), E->getSubExpr()->getType());
+  }
+
+  case CK_NoOp:
+    if (!E->getSubExpr()->isRValue() || E->getType()->isRecordType())
+      return EmitLValue(E->getSubExpr());
     // Fall through to synthesize a temporary.
 
   case CK_LValueToRValue:
@@ -1860,17 +1837,7 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
       cast<CXXRecordDecl>(DerivedClassTy->getDecl());
     
     LValue LV = EmitLValue(E->getSubExpr());
-    llvm::Value *This;
-    if (LV.isPropertyRef() || LV.isKVCRef()) {
-      QualType QT = E->getSubExpr()->getType();
-      RValue RV = 
-        LV.isPropertyRef() ? EmitLoadOfPropertyRefLValue(LV, QT)
-                           : EmitLoadOfKVCRefLValue(LV, QT);
-      assert (!RV.isScalar() && "EmitCastLValue");
-      This = RV.getAggregateAddr();
-    }
-    else
-      This = LV.getAddress();
+    llvm::Value *This = LV.getAddress();
     
     // Perform the derived-to-base conversion
     llvm::Value *Base = 
@@ -1972,7 +1939,7 @@ RValue CodeGenFunction::EmitCallExpr(const CallExpr *E,
 LValue CodeGenFunction::EmitBinaryOperatorLValue(const BinaryOperator *E) {
   // Comma expressions just emit their LHS then their RHS as an l-value.
   if (E->getOpcode() == BO_Comma) {
-    EmitAnyExpr(E->getLHS());
+    EmitIgnoredExpr(E->getLHS());
     EnsureInsertPoint();
     return EmitLValue(E->getRHS());
   }
@@ -1981,14 +1948,9 @@ LValue CodeGenFunction::EmitBinaryOperatorLValue(const BinaryOperator *E) {
       E->getOpcode() == BO_PtrMemI)
     return EmitPointerToDataMemberBinaryExpr(E);
 
-  assert(E->isAssignmentOp() && "unexpected binary l-value");
+  assert(E->getOpcode() == BO_Assign && "unexpected binary l-value");
   
   if (!hasAggregateLLVMType(E->getType())) {
-    if (E->isCompoundAssignmentOp())
-      return EmitCompoundAssignOperatorLValue(cast<CompoundAssignOperator>(E));
-
-    assert(E->getOpcode() == BO_Assign && "unexpected binary l-value");
-
     // Emit the LHS as an l-value.
     LValue LV = EmitLValue(E->getLHS());
     // Store the value through the l-value.
@@ -1999,9 +1961,6 @@ LValue CodeGenFunction::EmitBinaryOperatorLValue(const BinaryOperator *E) {
   if (E->getType()->isAnyComplexType())
     return EmitComplexAssignmentLValue(E);
 
-  // The compound assignment operators are not used for aggregates.
-  assert(E->getOpcode() == BO_Assign && "aggregate compound assignment?");
-  
   return EmitAggExprToLValue(E);
 }
 
@@ -2100,16 +2059,6 @@ LValue CodeGenFunction::EmitObjCIvarRefLValue(const ObjCIvarRefExpr *E) {
                       BaseQuals.getCVRQualifiers());
   setObjCGCLValueClass(getContext(), E, LV);
   return LV;
-}
-
-LValue
-CodeGenFunction::EmitObjCPropertyRefLValue(const ObjCPropertyRefExpr *E) {
-  // This is a special l-value that just issues sends when we load or
-  // store through it.
-
-  if (E->isImplicitProperty())
-    return LValue::MakeKVCRef(E, E->getType().getCVRQualifiers());
-  return LValue::MakePropertyRef(E, E->getType().getCVRQualifiers());
 }
 
 LValue CodeGenFunction::EmitStmtExprLValue(const StmtExpr *E) {

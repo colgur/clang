@@ -99,10 +99,25 @@ class NamedDecl : public Decl {
   /// constructor, Objective-C selector, etc.)
   DeclarationName Name;
 
+  /// \brief Whether we have already cached linkage and visibility.
+  mutable unsigned HasLinkageAndVisibilityCached : 1;
+
+  /// \brief The cached visibility, if \c HasLinkageAndVisibilityCached is 
+  /// non-zero.
+  mutable unsigned CachedVisibility : 2;
+
+  /// \brief Whether the cached visibility was explicitly placed on this
+  /// declaration.
+  mutable unsigned CachedVisibilityIsExplicit : 1;
+  
+  /// \brief The cached linkage, if \c HasLinkageAndVisibilityCached is
+  /// non-zero.
+  mutable unsigned CachedLinkage : 2;
+
 protected:
   NamedDecl(Kind DK, DeclContext *DC, SourceLocation L, DeclarationName N)
-    : Decl(DK, DC, L), Name(N) { }
-
+    : Decl(DK, DC, L), Name(N), HasLinkageAndVisibilityCached(0) { }
+  
 public:
   /// getIdentifier - Get the identifier that names this declaration,
   /// if there is one. This will return NULL if this declaration has
@@ -271,6 +286,13 @@ public:
 
   /// \brief Determines the linkage and visibility of this entity.
   LinkageInfo getLinkageAndVisibility() const;
+
+  /// \brief Clear the linkage and visibility cache in response to a change
+  /// to the declaration. 
+  ///
+  /// \param Redeclarations When true, we also have to clear out the linkage
+  /// and visibility cache for all redeclarations.
+  void ClearLinkageAndVisibilityCache();
 
   /// \brief Looks through UsingDecls and ObjCCompatibleAliasDecls for
   /// the underlying named decl.
@@ -625,6 +647,8 @@ private:
   bool NRVOVariable : 1;
   
   friend class StmtIteratorBase;
+  friend class ASTDeclReader;
+  
 protected:
   VarDecl(Kind DK, DeclContext *DC, SourceLocation L, IdentifierInfo *Id,
           QualType T, TypeSourceInfo *TInfo, StorageClass SC,
@@ -660,10 +684,7 @@ public:
   StorageClass getStorageClassAsWritten() const {
     return (StorageClass) SClassAsWritten;
   }
-  void setStorageClass(StorageClass SC) {
-    assert(isLegalForVariable(SC));
-    SClass = SC;
-  }
+  void setStorageClass(StorageClass SC);
   void setStorageClassAsWritten(StorageClass SC) {
     assert(isLegalForVariable(SC));
     SClassAsWritten = SC;
@@ -1478,10 +1499,7 @@ public:
   }
                        
   StorageClass getStorageClass() const { return StorageClass(SClass); }
-  void setStorageClass(StorageClass SC) {
-    assert(isLegalForFunction(SC));
-    SClass = SC;
-  }
+  void setStorageClass(StorageClass SC);
 
   StorageClass getStorageClassAsWritten() const {
     return StorageClass(SClassAsWritten);
@@ -1946,9 +1964,14 @@ protected:
   unsigned NumPositiveBits : 8;
   unsigned NumNegativeBits : 8;
 
-  /// IsScoped - True if this is tag declaration is a scoped enumeration. Only
+  /// IsScoped - True if this tag declaration is a scoped enumeration. Only
   /// possible in C++0x mode.
   bool IsScoped : 1;
+  /// IsScopedUsingClassTag - If this tag declaration is a scoped enum,
+  /// then this is true if the scoped enum was declared using the class
+  /// tag, false if it was declared with the struct tag. No meaning is
+  /// associated if this tag declaration is not a scoped enum.
+  bool IsScopedUsingClassTag : 1;
 
   /// IsFixed - True if this is an enumeration with fixed underlying type. Only
   /// possible in C++0x mode.
@@ -2171,12 +2194,14 @@ class EnumDecl : public TagDecl {
 
   EnumDecl(DeclContext *DC, SourceLocation L,
            IdentifierInfo *Id, EnumDecl *PrevDecl, SourceLocation TKL,
-           bool Scoped, bool Fixed)
+           bool Scoped, bool ScopedUsingClassTag, bool Fixed)
     : TagDecl(Enum, TTK_Enum, DC, L, Id, PrevDecl, TKL), InstantiatedFrom(0) {
+      assert(Scoped || !ScopedUsingClassTag);
       IntegerType = (const Type*)0;
       NumNegativeBits = 0;
       NumPositiveBits = 0;
       IsScoped = Scoped;
+      IsScopedUsingClassTag = ScopedUsingClassTag;
       IsFixed = Fixed;
     }
 public:
@@ -2197,7 +2222,8 @@ public:
   static EnumDecl *Create(ASTContext &C, DeclContext *DC,
                           SourceLocation L, IdentifierInfo *Id,
                           SourceLocation TKL, EnumDecl *PrevDecl,
-                          bool IsScoped, bool IsFixed);
+                          bool IsScoped, bool IsScopedUsingClassTag,
+                          bool IsFixed);
   static EnumDecl *Create(ASTContext &C, EmptyShell Empty);
 
   /// completeDefinition - When created, the EnumDecl corresponds to a
@@ -2286,6 +2312,11 @@ public:
   /// \brief Returns true if this is a C++0x scoped enumeration.
   bool isScoped() const {
     return IsScoped;
+  }
+
+  /// \brief Returns true if this is a C++0x scoped enumeration.
+  bool isScopedUsingClassTag() const {
+    return IsScopedUsingClassTag;
   }
 
   /// \brief Returns true if this is a C++0x enumeration with fixed underlying
@@ -2544,6 +2575,63 @@ inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
   DB.AddTaggedVal(reinterpret_cast<intptr_t>(ND), Diagnostic::ak_nameddecl);
   return DB;
 }
+
+template<typename decl_type>
+void Redeclarable<decl_type>::setPreviousDeclaration(decl_type *PrevDecl) {
+  // Note: This routine is implemented here because we need both NamedDecl
+  // and Redeclarable to be defined.
+  decl_type *First;
+  
+  if (PrevDecl) {
+    // Point to previous. Make sure that this is actually the most recent
+    // redeclaration, or we can build invalid chains. If the most recent
+    // redeclaration is invalid, it won't be PrevDecl, but we want it anyway.
+    RedeclLink = PreviousDeclLink(llvm::cast<decl_type>(
+                                                        PrevDecl->getMostRecentDeclaration()));
+    First = PrevDecl->getFirstDeclaration();
+    assert(First->RedeclLink.NextIsLatest() && "Expected first");
+  } else {
+    // Make this first.
+    First = static_cast<decl_type*>(this);
+  }
+  
+  // First one will point to this one as latest.
+  First->RedeclLink = LatestDeclLink(static_cast<decl_type*>(this));
+  
+  // If this declaration has a visibility attribute that differs from the 
+  // previous visibility attribute, or has private extern storage while the
+  // previous declaration merely had extern storage, clear out the linkage and 
+  ///visibility cache. This is required because declarations after the first 
+  // declaration can change the visibility for all previous and future 
+  // declarations.
+  if (NamedDecl *ND = dyn_cast<NamedDecl>(static_cast<decl_type*>(this))) {
+    bool MustClear = false;
+    if (VisibilityAttr *Visibility = ND->getAttr<VisibilityAttr>()) {
+      VisibilityAttr *PrevVisibility 
+                                = PrevDecl->template getAttr<VisibilityAttr>();
+      if (!PrevVisibility || 
+          PrevVisibility->getVisibility() != Visibility->getVisibility())
+        MustClear = true;
+    }
+    
+    if (!MustClear) {
+      if (VarDecl *VD = dyn_cast<VarDecl>(ND)) {
+        if (VD->getStorageClass() != cast<VarDecl>(PrevDecl)->getStorageClass())
+          MustClear = true;
+      } else if (FunctionDecl *FD = dyn_cast<FunctionDecl>(ND)) {
+        FunctionDecl *PrevFD = cast<FunctionDecl>(PrevDecl);
+        if (FD->getStorageClass() != PrevFD->getStorageClass())
+          MustClear = true;
+        else if (FD->isInlineSpecified() && !PrevFD->isInlined())
+          MustClear = true;
+      }
+    }
+    
+    if (MustClear)
+      ND->ClearLinkageAndVisibilityCache();
+  }
+}
+
 
 }  // end namespace clang
 

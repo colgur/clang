@@ -308,8 +308,12 @@ void DeclPrinter::VisitTypedefDecl(TypedefDecl *D) {
 
 void DeclPrinter::VisitEnumDecl(EnumDecl *D) {
   Out << "enum ";
-  if (D->isScoped())
-    Out << "class ";
+  if (D->isScoped()) {
+    if (D->isScopedUsingClassTag())
+      Out << "class ";
+    else
+      Out << "struct ";
+  }
   Out << D;
 
   if (D->isFixed()) {
@@ -432,8 +436,8 @@ void DeclPrinter::VisitFunctionDecl(FunctionDecl *D) {
           CXXBaseOrMemberInitializer * BMInitializer = (*B);
           if (B != CDecl->init_begin())
             Out << ", ";
-          if (BMInitializer->isMemberInitializer()) {
-            FieldDecl *FD = BMInitializer->getMember();
+          if (BMInitializer->isAnyMemberInitializer()) {
+            FieldDecl *FD = BMInitializer->getAnyMember();
             Out << FD;
           } else {
             Out << QualType(BMInitializer->getBaseClass(),

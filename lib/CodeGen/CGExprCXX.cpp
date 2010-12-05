@@ -122,18 +122,8 @@ RValue CodeGenFunction::EmitCXXMemberCallExpr(const CXXMemberCallExpr *CE,
   llvm::Value *This;
   if (ME->isArrow())
     This = EmitScalarExpr(ME->getBase());
-  else {
-    LValue BaseLV = EmitLValue(ME->getBase());
-    if (BaseLV.isPropertyRef() || BaseLV.isKVCRef()) {
-      QualType QT = ME->getBase()->getType();
-      RValue RV = 
-        BaseLV.isPropertyRef() ? EmitLoadOfPropertyRefLValue(BaseLV, QT)
-          : EmitLoadOfKVCRefLValue(BaseLV, QT);
-      This = RV.isScalar() ? RV.getScalarVal() : RV.getAggregateAddr();
-    }
-    else
-      This = BaseLV.getAddress();
-  }
+  else
+    This = EmitLValue(ME->getBase()).getAddress();
 
   if (MD->isTrivial()) {
     if (isa<CXXDestructorDecl>(MD)) return RValue::get(0);
@@ -235,25 +225,14 @@ CodeGenFunction::EmitCXXOperatorMemberCallExpr(const CXXOperatorCallExpr *E,
                                                ReturnValueSlot ReturnValue) {
   assert(MD->isInstance() &&
          "Trying to emit a member call expr on a static method!");
+  LValue LV = EmitLValue(E->getArg(0));
+  llvm::Value *This = LV.getAddress();
+
   if (MD->isCopyAssignmentOperator()) {
     const CXXRecordDecl *ClassDecl = cast<CXXRecordDecl>(MD->getDeclContext());
     if (ClassDecl->hasTrivialCopyAssignment()) {
       assert(!ClassDecl->hasUserDeclaredCopyAssignment() &&
              "EmitCXXOperatorMemberCallExpr - user declared copy assignment");
-      LValue LV = EmitLValue(E->getArg(0));
-      llvm::Value *This;
-      if (LV.isPropertyRef() || LV.isKVCRef()) {
-        AggValueSlot Slot = CreateAggTemp(E->getArg(1)->getType());
-        EmitAggExpr(E->getArg(1), Slot);
-        if (LV.isPropertyRef())
-          EmitObjCPropertySet(LV.getPropertyRefExpr(), Slot.asRValue());
-        else
-          EmitObjCPropertySet(LV.getKVCRefExpr(), Slot.asRValue());
-        return RValue::getAggregate(0, false);
-      }
-      else
-        This = LV.getAddress();
-      
       llvm::Value *Src = EmitLValue(E->getArg(1)).getAddress();
       QualType Ty = E->getType();
       EmitAggregateCopy(This, Src, Ty);
@@ -265,19 +244,6 @@ CodeGenFunction::EmitCXXOperatorMemberCallExpr(const CXXOperatorCallExpr *E,
   const llvm::Type *Ty =
     CGM.getTypes().GetFunctionType(CGM.getTypes().getFunctionInfo(MD),
                                    FPT->isVariadic());
-  LValue LV = EmitLValue(E->getArg(0));
-  llvm::Value *This;
-  if (LV.isPropertyRef() || LV.isKVCRef()) {
-    QualType QT = E->getArg(0)->getType();
-    RValue RV = 
-      LV.isPropertyRef() ? EmitLoadOfPropertyRefLValue(LV, QT)
-                         : EmitLoadOfKVCRefLValue(LV, QT);
-    assert (!RV.isScalar() && "EmitCXXOperatorMemberCallExpr");
-    This = RV.getAggregateAddr();
-  }
-  else
-    This = LV.getAddress();
-
   llvm::Value *Callee;
   if (MD->isVirtual() && !canDevirtualizeMemberFunctionCalls(E->getArg(0), MD))
     Callee = BuildVirtualCall(MD, This, Ty);

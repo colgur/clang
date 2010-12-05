@@ -282,8 +282,16 @@ void AggExprEmitter::VisitCastExpr(CastExpr *E) {
     break;
   }
 
+  case CK_GetObjCProperty: {
+    LValue LV = CGF.EmitLValue(E->getSubExpr());
+    assert(LV.isPropertyRef());
+    RValue RV = CGF.EmitLoadOfPropertyRefLValue(LV, getReturnValueSlot());
+    EmitGCMove(E, RV);
+    break;
+  }
+
+  case CK_LValueToRValue: // hope for downstream optimization
   case CK_NoOp:
-  case CK_LValueToRValue:
   case CK_UserDefinedConversion:
   case CK_ConstructorConversion:
     assert(CGF.getContext().hasSameUnqualifiedType(E->getSubExpr()->getType(),
@@ -349,12 +357,12 @@ void AggExprEmitter::VisitObjCMessageExpr(ObjCMessageExpr *E) {
 }
 
 void AggExprEmitter::VisitObjCPropertyRefExpr(ObjCPropertyRefExpr *E) {
-  RValue RV = CGF.EmitObjCPropertyGet(E, getReturnValueSlot());
-  EmitGCMove(E, RV);
+  llvm_unreachable("direct property access not surrounded by "
+                   "lvalue-to-rvalue cast");
 }
 
 void AggExprEmitter::VisitBinComma(const BinaryOperator *E) {
-  CGF.EmitAnyExpr(E->getLHS(), AggValueSlot::ignored(), true);
+  CGF.EmitIgnoredExpr(E->getLHS());
   Visit(E->getRHS());
 }
 
@@ -388,11 +396,7 @@ void AggExprEmitter::VisitBinAssign(const BinaryOperator *E) {
   if (LHS.isPropertyRef()) {
     AggValueSlot Slot = EnsureSlot(E->getRHS()->getType());
     CGF.EmitAggExpr(E->getRHS(), Slot);
-    CGF.EmitObjCPropertySet(LHS.getPropertyRefExpr(), Slot.asRValue());
-  } else if (LHS.isKVCRef()) {
-    AggValueSlot Slot = EnsureSlot(E->getRHS()->getType());
-    CGF.EmitAggExpr(E->getRHS(), Slot);
-    CGF.EmitObjCPropertySet(LHS.getKVCRefExpr(), Slot.asRValue());
+    CGF.EmitStoreThroughPropertyRefLValue(Slot.asRValue(), LHS);
   } else {
     bool GCollection = false;
     if (CGF.getContext().getLangOptions().getGCMode())
@@ -543,7 +547,7 @@ AggExprEmitter::EmitInitializationToLValue(Expr* E, LValue LV, QualType T) {
     CGF.EmitAggExpr(E, AggValueSlot::forAddr(LV.getAddress(), false, true,
                                              false, Dest.isZeroed()));
   } else {
-    CGF.EmitStoreThroughLValue(CGF.EmitAnyExpr(E), LV, T);
+    CGF.EmitStoreThroughLValue(RValue::get(CGF.EmitScalarExpr(E)), LV, T);
   }
 }
 

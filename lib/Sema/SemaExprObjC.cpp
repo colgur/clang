@@ -284,6 +284,9 @@ bool Sema::CheckMessageArgumentTypes(Expr **Args, unsigned NumArgs,
 }
 
 bool Sema::isSelfExpr(Expr *RExpr) {
+  if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(RExpr))
+    if (ICE->getCastKind() == CK_LValueToRValue)
+      RExpr = ICE->getSubExpr();
   if (DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(RExpr))
     if (DRE->getDecl()->getIdentifier() == &Context.Idents.get("self"))
       return true;
@@ -402,7 +405,7 @@ HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
 
   // If this reference is in an @implementation, check for 'private' methods.
   if (!Getter)
-    Getter = IFace->lookupPrivateInstanceMethod(Sel);
+    Getter = IFace->lookupPrivateMethod(Sel);
 
   // Look through local category implementations associated with the class.
   if (!Getter)
@@ -421,7 +424,7 @@ HandleExprPropertyRefExpr(const ObjCObjectPointerType *OPT,
   if (!Setter) {
     // If this reference is in an @implementation, also check for 'private'
     // methods.
-    Setter = IFace->lookupPrivateInstanceMethod(SetterSel);
+    Setter = IFace->lookupPrivateMethod(SetterSel);
   }
   // Look through local category implementations associated with the class.
   if (!Setter)

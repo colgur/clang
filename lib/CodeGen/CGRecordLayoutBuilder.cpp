@@ -106,6 +106,9 @@ private:
   /// Returns false if the operation failed because the struct is not packed.
   bool LayoutFields(const RecordDecl *D);
 
+  /// Layout a single base, virtual or non-virtual
+  void LayoutBase(const CXXRecordDecl *BaseDecl, uint64_t BaseOffset);
+
   /// LayoutVirtualBase - layout a single virtual base.
   void LayoutVirtualBase(const CXXRecordDecl *BaseDecl, uint64_t BaseOffset);
 
@@ -136,7 +139,8 @@ private:
 
   /// AppendPadding - Appends enough padding bytes so that the total
   /// struct size is a multiple of the field alignment.
-  void AppendPadding(uint64_t FieldOffsetInBytes, unsigned FieldAlignment);
+  void AppendPadding(uint64_t FieldOffsetInBytes,
+                     unsigned FieldAlignmentInBytes);
 
   /// getByteArrayType - Returns a byte array type with the given number of
   /// elements.
@@ -325,7 +329,7 @@ void CGRecordLayoutBuilder::LayoutBitField(const FieldDecl *D,
     assert(FieldOffset % 8 == 0 && "Field offset not aligned correctly");
 
     // Append padding if necessary.
-    AppendBytes((FieldOffset - NextFieldOffset) / 8);
+    AppendPadding(FieldOffset / 8, 1);
 
     NumBytesToAppend =
       llvm::RoundUpToAlignment(FieldSize, 8) / 8;
@@ -393,13 +397,7 @@ bool CGRecordLayoutBuilder::LayoutField(const FieldDecl *D,
     return false;
   }
 
-  if (AlignedNextFieldOffsetInBytes < FieldOffsetInBytes) {
-    // Even with alignment, the field offset is not at the right place,
-    // insert padding.
-    uint64_t PaddingInBytes = FieldOffsetInBytes - NextFieldOffsetInBytes;
-
-    AppendBytes(PaddingInBytes);
-  }
+  AppendPadding(FieldOffsetInBytes, TypeAlignment);
 
   // Now append the field.
   LLVMFields.push_back(LLVMFieldInfo(D, FieldTypes.size()));
@@ -495,6 +493,21 @@ void CGRecordLayoutBuilder::LayoutUnion(const RecordDecl *D) {
     AppendPadding(Layout.getSize() / 8, Align);
 }
 
+void CGRecordLayoutBuilder::LayoutBase(const CXXRecordDecl *BaseDecl,
+                                       uint64_t BaseOffset) {
+  CheckZeroInitializable(BaseDecl);
+
+  const ASTRecordLayout &Layout = 
+    Types.getContext().getASTRecordLayout(BaseDecl);
+  
+  uint64_t NonVirtualSize = Layout.getNonVirtualSize();
+  
+  AppendPadding(BaseOffset / 8, 1);
+  
+  // FIXME: Actually use a better type than [sizeof(BaseDecl) x i8] when we can.
+  AppendBytes(NonVirtualSize / 8);
+}
+
 void
 CGRecordLayoutBuilder::LayoutVirtualBase(const CXXRecordDecl *BaseDecl,
                                          uint64_t BaseOffset) {
@@ -509,13 +522,12 @@ CGRecordLayoutBuilder::LayoutVirtualBase(const CXXRecordDecl *BaseDecl,
 
   uint64_t NonVirtualSize = Layout.getNonVirtualSize();
 
-  // FIXME: Actually use a better type than [sizeof(BaseDecl) x i8] when we can.
   AppendPadding(BaseOffset / 8, 1);
   
-  // FIXME: Add the vbase field info.
-
+  // FIXME: Actually use a better type than [sizeof(BaseDecl) x i8] when we can.
   AppendBytes(NonVirtualSize / 8);
 
+  // FIXME: Add the vbase field info.
 }
 
 /// LayoutVirtualBases - layout the non-virtual bases of a record decl.
@@ -553,20 +565,10 @@ void CGRecordLayoutBuilder::LayoutNonVirtualBase(const CXXRecordDecl *BaseDecl,
   if (BaseDecl->isEmpty())
     return;
 
-  CheckZeroInitializable(BaseDecl);
-  
-  const ASTRecordLayout &Layout = 
-    Types.getContext().getASTRecordLayout(BaseDecl);
+  LayoutBase(BaseDecl, BaseOffset);
 
-  uint64_t NonVirtualSize = Layout.getNonVirtualSize();
-
-  // FIXME: Actually use a better type than [sizeof(BaseDecl) x i8] when we can.
-  AppendPadding(BaseOffset / 8, 1);
-  
   // Append the base field.
-  LLVMNonVirtualBases.push_back(LLVMBaseInfo(BaseDecl, FieldTypes.size()));
-
-  AppendBytes(NonVirtualSize / 8);
+  LLVMNonVirtualBases.push_back(LLVMBaseInfo(BaseDecl, FieldTypes.size() - 1));
 }
 
 void
@@ -713,13 +715,13 @@ void CGRecordLayoutBuilder::AppendField(uint64_t FieldOffsetInBytes,
 }
 
 void CGRecordLayoutBuilder::AppendPadding(uint64_t FieldOffsetInBytes,
-                                          unsigned FieldAlignment) {
+                                          unsigned FieldAlignmentInBytes) {
   assert(NextFieldOffsetInBytes <= FieldOffsetInBytes &&
          "Incorrect field layout!");
 
   // Round up the field offset to the alignment of the field type.
   uint64_t AlignedNextFieldOffsetInBytes =
-    llvm::RoundUpToAlignment(NextFieldOffsetInBytes, FieldAlignment);
+    llvm::RoundUpToAlignment(NextFieldOffsetInBytes, FieldAlignmentInBytes);
 
   if (AlignedNextFieldOffsetInBytes < FieldOffsetInBytes) {
     // Even with alignment, the field offset is not at the right place,

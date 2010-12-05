@@ -242,6 +242,7 @@ void ASTDeclReader::VisitEnumDecl(EnumDecl *ED) {
   ED->setNumPositiveBits(Record[Idx++]);
   ED->setNumNegativeBits(Record[Idx++]);
   ED->IsScoped = Record[Idx++];
+  ED->IsScopedUsingClassTag = Record[Idx++];
   ED->IsFixed = Record[Idx++];
   ED->setInstantiationOfMemberEnum(
                          cast_or_null<EnumDecl>(Reader.GetDecl(Record[Idx++])));
@@ -383,7 +384,7 @@ void ASTDeclReader::VisitFunctionDecl(FunctionDecl *FD) {
   // FunctionDecl's body is handled last at ASTDeclReader::Visit,
   // after everything else is read.
 
-  FD->setStorageClass((StorageClass)Record[Idx++]);
+  FD->SClass = (StorageClass)Record[Idx++];
   FD->setStorageClassAsWritten((StorageClass)Record[Idx++]);
   FD->setInlineSpecified(Record[Idx++]);
   FD->setVirtualAsWritten(Record[Idx++]);
@@ -650,7 +651,7 @@ void ASTDeclReader::VisitIndirectFieldDecl(IndirectFieldDecl *FD) {
 void ASTDeclReader::VisitVarDecl(VarDecl *VD) {
   VisitDeclaratorDecl(VD);
   VisitRedeclarable(VD);
-  VD->setStorageClass((StorageClass)Record[Idx++]);
+  VD->SClass = (StorageClass)Record[Idx++];
   VD->setStorageClassAsWritten((StorageClass)Record[Idx++]);
   VD->setThreadSpecified(Record[Idx++]);
   VD->setCXXDirectInitializer(Record[Idx++]);

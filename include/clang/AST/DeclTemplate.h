@@ -1241,6 +1241,8 @@ public:
   }
 
   void setSpecializationKind(TemplateSpecializationKind TSK) {
+    if (getSpecializationKind() != TSK)
+      ClearLinkageAndVisibilityCache();
     SpecializationKind = TSK;
   }
 

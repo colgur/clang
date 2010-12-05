@@ -698,6 +698,7 @@ void InitListChecker::CheckSubElementType(const InitializedEntity &Entity,
       //   that of the expression.
       if ((ElemType->isRecordType() || ElemType->isVectorType()) &&
           SemaRef.Context.hasSameUnqualifiedType(expr->getType(), ElemType)) {
+        SemaRef.DefaultFunctionArrayLvalueConversion(expr);
         UpdateStructuredListElement(StructuredList, StructuredIndex, expr);
         ++Index;
         return;
@@ -3627,12 +3628,18 @@ InitializationSequence::Perform(Sema &S,
   case SK_ListInitialization:
   case SK_CAssignment:
   case SK_StringInit:
-  case SK_ObjCObjectConversion:
+  case SK_ObjCObjectConversion: {
     assert(Args.size() == 1);
-    CurInit = ExprResult(Args.get()[0]);
-    if (CurInit.isInvalid())
-      return ExprError();
+    Expr *CurInitExpr = Args.get()[0];
+    if (!CurInitExpr) return ExprError();
+
+    // Read from a property when initializing something with it.
+    if (CurInitExpr->getObjectKind() == OK_ObjCProperty)
+      S.ConvertPropertyForRValue(CurInitExpr);
+
+    CurInit = ExprResult(CurInitExpr);
     break;
+  }
     
   case SK_ConstructorInitialization:
   case SK_ZeroInitialization:
@@ -3647,7 +3654,7 @@ InitializationSequence::Perform(Sema &S,
     if (CurInit.isInvalid())
       return ExprError();
     
-    Expr *CurInitExpr = (Expr *)CurInit.get();
+    Expr *CurInitExpr = CurInit.get();
     QualType SourceType = CurInitExpr? CurInitExpr->getType() : QualType();
     
     switch (Step->Kind) {

@@ -1719,8 +1719,8 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
         // the initial standard conversion sequence converts the source type to
         // the implicit object parameter of the conversion function.
         BeforeToType = Context.getTagDeclType(Conv->getParent());
-      } else if (const CXXConstructorDecl *Ctor = 
-                  dyn_cast<CXXConstructorDecl>(FD)) {
+      } else {
+        const CXXConstructorDecl *Ctor = cast<CXXConstructorDecl>(FD);
         CastKind = CK_ConstructorConversion;
         // Do no conversion if dealing with ... for the first conversion.
         if (!ICS.UserDefined.EllipsisConversion) {
@@ -1730,8 +1730,6 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
           BeforeToType = Ctor->getParamDecl(0)->getType().getNonReferenceType();
         }
       }    
-      else
-        assert(0 && "Unknown conversion function kind!");
       // Watch out for elipsis conversion.
       if (!ICS.UserDefined.EllipsisConversion) {
         if (PerformImplicitConversion(From, BeforeToType, 
@@ -1845,8 +1843,19 @@ Sema::PerformImplicitConversion(Expr *&From, QualType ToType,
   // Perform the first implicit conversion.
   switch (SCS.First) {
   case ICK_Identity:
-  case ICK_Lvalue_To_Rvalue:
     // Nothing to do.
+    break;
+
+  case ICK_Lvalue_To_Rvalue:
+    // Should this get its own ICK?
+    if (From->getObjectKind() == OK_ObjCProperty) {
+      ConvertPropertyForRValue(From);
+      if (!From->isRValue()) break;
+    }
+
+    FromType = FromType.getUnqualifiedType();
+    From = ImplicitCastExpr::Create(Context, FromType, CK_LValueToRValue,
+                                    From, 0, VK_RValue);
     break;
 
   case ICK_Array_To_Pointer:
@@ -2746,14 +2755,14 @@ QualType Sema::CXXCheckConditionalOperands(Expr *&Cond, Expr *&LHS, Expr *&RHS,
       // The operands have class type. Make a temporary copy.
       InitializedEntity Entity = InitializedEntity::InitializeTemporary(LTy);
       ExprResult LHSCopy = PerformCopyInitialization(Entity, 
-                                                           SourceLocation(), 
-                                                           Owned(LHS));
+                                                     SourceLocation(), 
+                                                     Owned(LHS));
       if (LHSCopy.isInvalid())
         return QualType();
         
       ExprResult RHSCopy = PerformCopyInitialization(Entity, 
-                                                           SourceLocation(), 
-                                                           Owned(RHS));
+                                                     SourceLocation(), 
+                                                     Owned(RHS));
       if (RHSCopy.isInvalid())
         return QualType();
       
@@ -3512,21 +3521,43 @@ ExprResult Sema::ActOnNoexceptExpr(SourceLocation KeyLoc, SourceLocation,
   return BuildCXXNoexceptExpr(KeyLoc, Operand, RParen);
 }
 
-ExprResult Sema::ActOnFinishFullExpr(Expr *FullExpr) {
-  if (!FullExpr) return ExprError();
-
+/// Perform the conversions required for an expression used in a
+/// context that ignores the result.
+void Sema::IgnoredValueConversions(Expr *&E) {
   // C99 6.3.2.1:
   //   [Except in specific positions,] an lvalue that does not have
   //   array type is converted to the value stored in the
   //   designated object (and is no longer an lvalue).
-  // This rule does not apply in C++;  however, in ObjC++, we do want
-  // to do lvalue-to-rvalue conversion on top-level ObjCProperty
-  // l-values.
-  if (!FullExpr->isRValue() &&
-      (!getLangOptions().CPlusPlus ||
-       FullExpr->getObjectKind() == OK_ObjCProperty))
-    DefaultFunctionArrayLvalueConversion(FullExpr);
+  if (E->isRValue()) return;
 
+  // We always want to do this on ObjC property references.
+  if (E->getObjectKind() == OK_ObjCProperty) {
+    ConvertPropertyForRValue(E);
+    if (E->isRValue()) return;
+  }
+
+  // Otherwise, this rule does not apply in C++, at least not for the moment.
+  if (getLangOptions().CPlusPlus) return;
+
+  // GCC seems to also exclude expressions of incomplete enum type.
+  if (const EnumType *T = E->getType()->getAs<EnumType>()) {
+    if (!T->getDecl()->isComplete()) {
+      // FIXME: stupid workaround for a codegen bug!
+      ImpCastExprToType(E, Context.VoidTy, CK_ToVoid);
+      return;
+    }
+  }
+
+  DefaultFunctionArrayLvalueConversion(E);
+  if (!E->getType()->isVoidType())
+    RequireCompleteType(E->getExprLoc(), E->getType(),
+                        diag::err_incomplete_type);
+}
+
+ExprResult Sema::ActOnFinishFullExpr(Expr *FullExpr) {
+  if (!FullExpr) return ExprError();
+
+  IgnoredValueConversions(FullExpr);
   CheckImplicitConversions(FullExpr);
   return MaybeCreateCXXExprWithTemporaries(FullExpr);
 }

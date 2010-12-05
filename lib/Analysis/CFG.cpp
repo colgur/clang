@@ -553,7 +553,7 @@ CFGBlock *CFGBuilder::addInitializer(CXXBaseOrMemberInitializer *I) {
   // after initialization finishes.
   Expr *Init = I->getInit();
   if (Init) {
-    if (FieldDecl *FD = I->getMember())
+    if (FieldDecl *FD = I->getAnyMember())
       IsReference = FD->getType()->isReferenceType();
     HasTemporaries = isa<CXXExprWithTemporaries>(Init);
 
@@ -825,6 +825,16 @@ tryAgain:
 
     case Stmt::ContinueStmtClass:
       return VisitContinueStmt(cast<ContinueStmt>(S));
+    
+    case Stmt::CStyleCastExprClass: {
+      CastExpr *castExpr = cast<CastExpr>(S);
+      if (castExpr->getCastKind() == CK_LValueToRValue) {
+        // temporary workaround
+        S = castExpr->getSubExpr();
+        goto tryAgain;
+      }
+      return VisitStmt(S, asc);
+    }
 
     case Stmt::CXXCatchStmtClass:
       return VisitCXXCatchStmt(cast<CXXCatchStmt>(S));
@@ -871,8 +881,15 @@ tryAgain:
     case Stmt::IfStmtClass:
       return VisitIfStmt(cast<IfStmt>(S));
 
-    case Stmt::ImplicitCastExprClass:
-      return VisitImplicitCastExpr(cast<ImplicitCastExpr>(S), asc);
+    case Stmt::ImplicitCastExprClass: {
+      ImplicitCastExpr *castExpr = cast<ImplicitCastExpr>(S);
+      if (castExpr->getCastKind() == CK_LValueToRValue) {
+        // temporary workaround
+        S = castExpr->getSubExpr();
+        goto tryAgain;
+      }
+      return VisitImplicitCastExpr(castExpr, asc);
+    }
 
     case Stmt::IndirectGotoStmtClass:
       return VisitIndirectGotoStmt(cast<IndirectGotoStmt>(S));
@@ -3076,7 +3093,7 @@ static void print_elem(llvm::raw_ostream &OS, StmtPrinterHelper* Helper,
     CXXBaseOrMemberInitializer* I = IE;
     if (I->isBaseInitializer())
       OS << I->getBaseClass()->getAsCXXRecordDecl()->getName();
-    else OS << I->getMember()->getName();
+    else OS << I->getAnyMember()->getName();
 
     OS << "(";
     if (Expr* IE = I->getInit())
