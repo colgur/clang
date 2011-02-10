@@ -35,6 +35,7 @@
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Basic/Diagnostic.h"
 #include "llvm/ADT/StringSet.h"
+#include "llvm/Support/Atomic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Host.h"
 #include "llvm/Support/Path.h"
@@ -85,7 +86,7 @@ const unsigned DefaultPreambleRebuildInterval = 5;
 /// \brief Tracks the number of ASTUnit objects that are currently active.
 ///
 /// Used for debugging purposes only.
-static unsigned ActiveASTUnitObjects;
+static llvm::sys::cas_flag ActiveASTUnitObjects;
 
 ASTUnit::ASTUnit(bool _MainFileIsAST)
   : CaptureDiagnostics(false), MainFileIsAST(_MainFileIsAST), 
@@ -98,7 +99,7 @@ ASTUnit::ASTUnit(bool _MainFileIsAST)
     CacheCodeCompletionCoolDown(0),
     UnsafeToFree(false) { 
   if (getenv("LIBCLANG_OBJTRACKING")) {
-    ++ActiveASTUnitObjects;
+    llvm::sys::AtomicIncrement(&ActiveASTUnitObjects);
     fprintf(stderr, "+++ %d translation units\n", ActiveASTUnitObjects);
   }    
 }
@@ -129,7 +130,7 @@ ASTUnit::~ASTUnit() {
   ClearCachedCompletionResults();  
   
   if (getenv("LIBCLANG_OBJTRACKING")) {
-    --ActiveASTUnitObjects;
+    llvm::sys::AtomicDecrement(&ActiveASTUnitObjects);
     fprintf(stderr, "--- %d translation units\n", ActiveASTUnitObjects);
   }    
 }
@@ -221,7 +222,7 @@ void ASTUnit::CacheCodeCompletionResults() {
   // Gather the set of global code completions.
   typedef CodeCompletionResult Result;
   llvm::SmallVector<Result, 8> Results;
-  TheSema->GatherGlobalCodeCompletions(Results);
+  TheSema->GatherGlobalCodeCompletions(CachedCompletionAllocator, Results);
   
   // Translate global code completions into cached completions.
   llvm::DenseMap<CanQualType, unsigned> CompletionTypes;
@@ -231,7 +232,8 @@ void ASTUnit::CacheCodeCompletionResults() {
     case Result::RK_Declaration: {
       bool IsNestedNameSpecifier = false;
       CachedCodeCompletionResult CachedResult;
-      CachedResult.Completion = Results[I].CreateCodeCompletionString(*TheSema);
+      CachedResult.Completion = Results[I].CreateCodeCompletionString(*TheSema,
+                                                     CachedCompletionAllocator);
       CachedResult.ShowInContexts = getDeclShowContexts(Results[I].Declaration,
                                                         Ctx->getLangOptions(),
                                                         IsNestedNameSpecifier);
@@ -293,7 +295,9 @@ void ASTUnit::CacheCodeCompletionResults() {
           // nested-name-specifier but isn't already an option, create a 
           // nested-name-specifier completion.
           Results[I].StartsNestedNameSpecifier = true;
-          CachedResult.Completion = Results[I].CreateCodeCompletionString(*TheSema);
+          CachedResult.Completion 
+            = Results[I].CreateCodeCompletionString(*TheSema,
+                                                    CachedCompletionAllocator);
           CachedResult.ShowInContexts = RemainingContexts;
           CachedResult.Priority = CCP_NestedNameSpecifier;
           CachedResult.TypeClass = STC_Void;
@@ -312,7 +316,9 @@ void ASTUnit::CacheCodeCompletionResults() {
       
     case Result::RK_Macro: {
       CachedCodeCompletionResult CachedResult;
-      CachedResult.Completion = Results[I].CreateCodeCompletionString(*TheSema);
+      CachedResult.Completion 
+        = Results[I].CreateCodeCompletionString(*TheSema,
+                                                CachedCompletionAllocator);
       CachedResult.ShowInContexts
         = (1 << (CodeCompletionContext::CCC_TopLevel - 1))
         | (1 << (CodeCompletionContext::CCC_ObjCInterface - 1))
@@ -336,7 +342,6 @@ void ASTUnit::CacheCodeCompletionResults() {
       break;
     }
     }
-    Results[I].Destroy();
   }
 
   // Make a note of the state when we performed this caching.
@@ -344,10 +349,9 @@ void ASTUnit::CacheCodeCompletionResults() {
 }
 
 void ASTUnit::ClearCachedCompletionResults() {
-  for (unsigned I = 0, N = CachedCompletionResults.size(); I != N; ++I)
-    delete CachedCompletionResults[I].Completion;
   CachedCompletionResults.clear();
   CachedCompletionTypes.clear();
+  CachedCompletionAllocator.Reset();
 }
 
 namespace {
@@ -464,6 +468,7 @@ llvm::MemoryBuffer *ASTUnit::getBufferForFile(llvm::StringRef Filename,
 
 /// \brief Configure the diagnostics object for use with ASTUnit.
 void ASTUnit::ConfigureDiags(llvm::IntrusiveRefCntPtr<Diagnostic> &Diags,
+                             const char **ArgBegin, const char **ArgEnd,
                              ASTUnit &AST, bool CaptureDiagnostics) {
   if (!Diags.getPtr()) {
     // No diagnostics engine was provided, so create our own diagnostics object
@@ -472,7 +477,8 @@ void ASTUnit::ConfigureDiags(llvm::IntrusiveRefCntPtr<Diagnostic> &Diags,
     DiagnosticClient *Client = 0;
     if (CaptureDiagnostics)
       Client = new StoredDiagnosticClient(AST.StoredDiagnostics);
-    Diags = CompilerInstance::createDiagnostics(DiagOpts, 0, 0, Client);
+    Diags = CompilerInstance::createDiagnostics(DiagOpts, ArgEnd- ArgBegin, 
+                                                ArgBegin, Client);
   } else if (CaptureDiagnostics) {
     Diags->setClient(new StoredDiagnosticClient(AST.StoredDiagnostics));
   }
@@ -486,7 +492,7 @@ ASTUnit *ASTUnit::LoadFromASTFile(const std::string &Filename,
                                   unsigned NumRemappedFiles,
                                   bool CaptureDiagnostics) {
   llvm::OwningPtr<ASTUnit> AST(new ASTUnit(true));
-  ConfigureDiags(Diags, *AST, CaptureDiagnostics);
+  ConfigureDiags(Diags, 0, 0, *AST, CaptureDiagnostics);
 
   AST->OnlyLocalDecls = OnlyLocalDecls;
   AST->CaptureDiagnostics = CaptureDiagnostics;
@@ -737,6 +743,7 @@ bool ASTUnit::Parse(llvm::MemoryBuffer *OverrideMainBuffer) {
   Clang.setDiagnostics(&getDiagnostics());
   
   // Create the target instance.
+  Clang.getTargetOpts().Features = TargetFeatures;
   Clang.setTarget(TargetInfo::CreateTargetInfo(Clang.getDiagnostics(),
                                                Clang.getTargetOpts()));
   if (!Clang.hasTarget()) {
@@ -847,6 +854,14 @@ bool ASTUnit::Parse(llvm::MemoryBuffer *OverrideMainBuffer) {
   }
 
   Invocation.reset(Clang.takeInvocation());
+
+  if (ShouldCacheCodeCompletionResults) {
+    if (CacheCodeCompletionCoolDown > 0)
+      --CacheCodeCompletionCoolDown;
+    else if (top_level_size() != NumTopLevelDeclsAtLastCompletionCache)
+      CacheCodeCompletionResults();
+  }
+
   return false;
   
 error:
@@ -1218,6 +1233,7 @@ llvm::MemoryBuffer *ASTUnit::getMainBufferWithPrecompiledPreamble(
   Clang.setDiagnostics(&getDiagnostics());
   
   // Create the target instance.
+  Clang.getTargetOpts().Features = TargetFeatures;
   Clang.setTarget(TargetInfo::CreateTargetInfo(Clang.getDiagnostics(),
                                                Clang.getTargetOpts()));
   if (!Clang.hasTarget()) {
@@ -1405,7 +1421,11 @@ bool ASTUnit::LoadFromCompilerInvocation(bool PrecompilePreamble) {
   // We'll manage file buffers ourselves.
   Invocation->getPreprocessorOpts().RetainRemappedFileBuffers = true;
   Invocation->getFrontendOpts().DisableFree = false;
+  ProcessWarningOptions(getDiagnostics(), Invocation->getDiagnosticOpts());
 
+  // Save the target features.
+  TargetFeatures = Invocation->getTargetOpts().Features;
+  
   llvm::MemoryBuffer *OverrideMainBuffer = 0;
   if (PrecompilePreamble) {
     PreambleRebuildCounter = 2;
@@ -1429,7 +1449,7 @@ ASTUnit *ASTUnit::LoadFromCompilerInvocation(CompilerInvocation *CI,
   // Create the AST unit.
   llvm::OwningPtr<ASTUnit> AST;
   AST.reset(new ASTUnit(false));
-  ConfigureDiags(Diags, *AST, CaptureDiagnostics);
+  ConfigureDiags(Diags, 0, 0, *AST, CaptureDiagnostics);
   AST->Diagnostics = Diags;
   AST->OnlyLocalDecls = OnlyLocalDecls;
   AST->CaptureDiagnostics = CaptureDiagnostics;
@@ -1458,7 +1478,8 @@ ASTUnit *ASTUnit::LoadFromCommandLine(const char **ArgBegin,
     // No diagnostics engine was provided, so create our own diagnostics object
     // with the default options.
     DiagnosticOptions DiagOpts;
-    Diags = CompilerInstance::createDiagnostics(DiagOpts, 0, 0);
+    Diags = CompilerInstance::createDiagnostics(DiagOpts, ArgEnd - ArgBegin, 
+                                                ArgBegin);
   }
   
   llvm::SmallVector<const char *, 16> Args;
@@ -1534,7 +1555,7 @@ ASTUnit *ASTUnit::LoadFromCommandLine(const char **ArgBegin,
   // Create the AST unit.
   llvm::OwningPtr<ASTUnit> AST;
   AST.reset(new ASTUnit(false));
-  ConfigureDiags(Diags, *AST, CaptureDiagnostics);
+  ConfigureDiags(Diags, ArgBegin, ArgEnd, *AST, CaptureDiagnostics);
   AST->Diagnostics = Diags;
   
   AST->FileMgr.reset(new FileManager(FileSystemOptions()));
@@ -1559,6 +1580,7 @@ bool ASTUnit::Reparse(RemappedFile *RemappedFiles, unsigned NumRemappedFiles) {
 
   // Remap files.
   PreprocessorOptions &PPOpts = Invocation->getPreprocessorOpts();
+  PPOpts.DisableStatCache = true;
   for (PreprocessorOptions::remapped_file_buffer_iterator 
          R = PPOpts.remapped_file_buffer_begin(),
          REnd = PPOpts.remapped_file_buffer_end();
@@ -1585,14 +1607,6 @@ bool ASTUnit::Reparse(RemappedFile *RemappedFiles, unsigned NumRemappedFiles) {
   
   // Parse the sources
   bool Result = Parse(OverrideMainBuffer);  
-  
-  if (ShouldCacheCodeCompletionResults) {
-    if (CacheCodeCompletionCoolDown > 0)
-      --CacheCodeCompletionCoolDown;
-    else if (top_level_size() != NumTopLevelDeclsAtLastCompletionCache)
-      CacheCodeCompletionResults();
-  }
-  
   return Result;
 }
 
@@ -1646,6 +1660,10 @@ namespace {
                                            OverloadCandidate *Candidates,
                                            unsigned NumCandidates) { 
       Next.ProcessOverloadCandidates(S, CurrentArg, Candidates, NumCandidates);
+    }
+    
+    virtual CodeCompletionAllocator &getAllocator() {
+      return Next.getAllocator();
     }
   };
 }
@@ -1740,7 +1758,6 @@ void AugmentedCodeCompleteConsumer::ProcessCodeCompleteResults(Sema &S,
 
   // Contains the set of names that are hidden by "local" completion results.
   llvm::StringSet<llvm::BumpPtrAllocator> HiddenNames;
-  llvm::SmallVector<CodeCompletionString *, 4> StringsToDestroy;
   typedef CodeCompletionResult Result;
   llvm::SmallVector<Result, 8> AllResults;
   for (ASTUnit::cached_completion_iterator 
@@ -1799,11 +1816,12 @@ void AugmentedCodeCompleteConsumer::ProcessCodeCompleteResults(Sema &S,
         Context.getKind() == CodeCompletionContext::CCC_MacroNameUse) {
       // Create a new code-completion string that just contains the
       // macro name, without its arguments.
-      Completion = new CodeCompletionString;
-      Completion->AddTypedTextChunk(C->Completion->getTypedText());
-      StringsToDestroy.push_back(Completion);
+      CodeCompletionBuilder Builder(getAllocator(), CCP_CodePattern,
+                                    C->Availability);
+      Builder.AddTypedTextChunk(C->Completion->getTypedText());
       CursorKind = CXCursor_NotImplemented;
       Priority = CCP_CodePattern;
+      Completion = Builder.TakeString();
     }
     
     AllResults.push_back(Result(Completion, Priority, CursorKind, 
@@ -1819,9 +1837,6 @@ void AugmentedCodeCompleteConsumer::ProcessCodeCompleteResults(Sema &S,
   
   Next.ProcessCodeCompleteResults(S, Context, AllResults.data(),
                                   AllResults.size());
-  
-  for (unsigned I = 0, N = StringsToDestroy.size(); I != N; ++I)
-    delete StringsToDestroy[I];
 }
 
 
@@ -1871,6 +1886,7 @@ void ASTUnit::CodeComplete(llvm::StringRef File, unsigned Line, unsigned Column,
                                     StoredDiagnostics);
   
   // Create the target instance.
+  Clang.getTargetOpts().Features = TargetFeatures;
   Clang.setTarget(TargetInfo::CreateTargetInfo(Clang.getDiagnostics(),
                                                Clang.getTargetOpts()));
   if (!Clang.hasTarget()) {
@@ -1933,6 +1949,7 @@ void ASTUnit::CodeComplete(llvm::StringRef File, unsigned Line, unsigned Column,
 
   // If the main file has been overridden due to the use of a preamble,
   // make that override happen and introduce the preamble.
+  PreprocessorOpts.DisableStatCache = true;
   StoredDiagnostics.insert(StoredDiagnostics.end(),
                            this->StoredDiagnostics.begin(),
              this->StoredDiagnostics.begin() + NumStoredDiagnosticsFromDriver);

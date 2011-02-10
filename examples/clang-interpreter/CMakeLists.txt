@@ -1,12 +1,11 @@
-set(LLVM_NO_RTTI 1)
-
 set(LLVM_USED_LIBS
     clangFrontend
     clangSerialization
     clangDriver
     clangCodeGen
     clangSema
-    clangChecker
+    clangStaticAnalyzerCheckers
+    clangStaticAnalyzerCore
     clangIndex
     clangAnalysis
     clangRewrite

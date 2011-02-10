@@ -231,8 +231,19 @@ protected:
   unsigned ChangedAfterLoad : 1;
 
   /// IdentifierNamespace - This specifies what IDNS_* namespace this lives in.
-  unsigned IdentifierNamespace : 15;
+  unsigned IdentifierNamespace : 12;
 
+  /// \brief Whether the \c CachedLinkage field is active.
+  ///
+  /// This field is only valid for NamedDecls subclasses.
+  mutable unsigned HasCachedLinkage : 1;
+  
+  /// \brief If \c HasCachedLinkage, the linkage of this declaration.
+  ///
+  /// This field is only valid for NamedDecls subclasses.
+  mutable unsigned CachedLinkage : 2;
+  
+  
 private:
   void CheckAccessDeclContext() const;
 
@@ -243,7 +254,9 @@ protected:
       Loc(L), DeclKind(DK), InvalidDecl(0),
       HasAttrs(false), Implicit(false), Used(false),
       Access(AS_none), PCHLevel(0), ChangedAfterLoad(false),
-      IdentifierNamespace(getIdentifierNamespaceForKind(DK)) {
+      IdentifierNamespace(getIdentifierNamespaceForKind(DK)),
+      HasCachedLinkage(0) 
+  {
     if (Decl::CollectingStats()) add(DK);
   }
 
@@ -251,7 +264,9 @@ protected:
     : NextDeclInContext(0), DeclKind(DK), InvalidDecl(0),
       HasAttrs(false), Implicit(false), Used(false),
       Access(AS_none), PCHLevel(0), ChangedAfterLoad(false),
-      IdentifierNamespace(getIdentifierNamespaceForKind(DK)) {
+      IdentifierNamespace(getIdentifierNamespaceForKind(DK)),
+      HasCachedLinkage(0)
+  {
     if (Decl::CollectingStats()) add(DK);
   }
 
@@ -316,7 +331,12 @@ public:
   void swapAttrs(Decl *D);
   void dropAttrs();
 
-  void addAttr(Attr *A);
+  void addAttr(Attr *A) {
+    if (hasAttrs())
+      getAttrs().push_back(A);
+    else
+      setAttrs(AttrVec(1, A));
+  }
 
   typedef AttrVec::const_iterator attr_iterator;
 
@@ -547,6 +567,9 @@ public:
   /// template parameter pack.
   bool isTemplateParameterPack() const;
 
+  /// \brief Whether this declaration is a parameter pack.
+  bool isParameterPack() const;
+  
   /// \brief Whether this declaration is a function or function template.
   bool isFunctionOrFunctionTemplate() const;
 

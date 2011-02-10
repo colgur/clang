@@ -105,10 +105,9 @@ llvm::Constant *CGCXXABI::EmitMemberPointer(const CXXMethodDecl *MD) {
                                          MD->getParent()->getTypeForDecl()));
 }
 
-llvm::Constant *CGCXXABI::EmitMemberPointer(const FieldDecl *FD) {
-  return GetBogusMemberPointer(CGM,
-                         CGM.getContext().getMemberPointerType(FD->getType(),
-                                         FD->getParent()->getTypeForDecl()));
+llvm::Constant *CGCXXABI::EmitMemberDataPointer(const MemberPointerType *MPT,
+                                                CharUnits offset) {
+  return GetBogusMemberPointer(CGM, QualType(MPT, 0));
 }
 
 bool CGCXXABI::isZeroInitializable(const MemberPointerType *MPT) {
@@ -142,13 +141,14 @@ void CGCXXABI::EmitReturnFromThunk(CodeGenFunction &CGF,
   CGF.EmitReturnOfRValue(RV, ResultType);
 }
 
-CharUnits CGCXXABI::GetArrayCookieSize(QualType ElementType) {
+CharUnits CGCXXABI::GetArrayCookieSize(const CXXNewExpr *expr) {
   return CharUnits::Zero();
 }
 
 llvm::Value *CGCXXABI::InitializeArrayCookie(CodeGenFunction &CGF,
                                              llvm::Value *NewPtr,
                                              llvm::Value *NumElements,
+                                             const CXXNewExpr *expr,
                                              QualType ElementType) {
   // Should never be called.
   ErrorUnsupportedABI(CGF, "array cookie initialization");
@@ -156,7 +156,8 @@ llvm::Value *CGCXXABI::InitializeArrayCookie(CodeGenFunction &CGF,
 }
 
 void CGCXXABI::ReadArrayCookie(CodeGenFunction &CGF, llvm::Value *Ptr,
-                               QualType ElementType, llvm::Value *&NumElements,
+                               const CXXDeleteExpr *expr, QualType ElementType,
+                               llvm::Value *&NumElements,
                                llvm::Value *&AllocPtr, CharUnits &CookieSize) {
   ErrorUnsupportedABI(CGF, "array cookie reading");
 

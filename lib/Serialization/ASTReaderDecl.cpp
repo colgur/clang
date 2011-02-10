@@ -167,7 +167,7 @@ void ASTDeclReader::Visit(Decl *D) {
 
   if (TypeDecl *TD = dyn_cast<TypeDecl>(D)) {
     // if we have a fully initialized TypeDecl, we can safely read its type now.
-    TD->setTypeForDecl(Reader.GetType(TypeIDForTypeDecl).getTypePtr());
+    TD->setTypeForDecl(Reader.GetType(TypeIDForTypeDecl).getTypePtrOrNull());
   } else if (FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
     // FunctionDecl's body was written last after all other Stmts/Exprs.
     if (Record[Idx++])
@@ -385,16 +385,17 @@ void ASTDeclReader::VisitFunctionDecl(FunctionDecl *FD) {
   // after everything else is read.
 
   FD->SClass = (StorageClass)Record[Idx++];
-  FD->setStorageClassAsWritten((StorageClass)Record[Idx++]);
-  FD->setInlineSpecified(Record[Idx++]);
-  FD->setVirtualAsWritten(Record[Idx++]);
-  FD->setPure(Record[Idx++]);
-  FD->setHasInheritedPrototype(Record[Idx++]);
-  FD->setHasWrittenPrototype(Record[Idx++]);
-  FD->setDeleted(Record[Idx++]);
-  FD->setTrivial(Record[Idx++]);
-  FD->setHasImplicitReturnZero(Record[Idx++]);
-  FD->setLocEnd(ReadSourceLocation(Record, Idx));
+  FD->SClassAsWritten = (StorageClass)Record[Idx++];
+  FD->IsInline = Record[Idx++];
+  FD->IsInlineSpecified = Record[Idx++];
+  FD->IsVirtualAsWritten = Record[Idx++];
+  FD->IsPure = Record[Idx++];
+  FD->HasInheritedPrototype = Record[Idx++];
+  FD->HasWrittenPrototype = Record[Idx++];
+  FD->IsDeleted = Record[Idx++];
+  FD->IsTrivial = Record[Idx++];
+  FD->HasImplicitReturnZero = Record[Idx++];
+  FD->EndRangeLoc = ReadSourceLocation(Record, Idx);
 
   // Read in the parameters.
   unsigned NumParams = Record[Idx++];
@@ -442,7 +443,7 @@ void ASTDeclReader::VisitObjCContainerDecl(ObjCContainerDecl *CD) {
 
 void ASTDeclReader::VisitObjCInterfaceDecl(ObjCInterfaceDecl *ID) {
   VisitObjCContainerDecl(ID);
-  ID->setTypeForDecl(Reader.GetType(Record[Idx++]).getTypePtr());
+  ID->setTypeForDecl(Reader.GetType(Record[Idx++]).getTypePtrOrNull());
   ID->setSuperClass(cast_or_null<ObjCInterfaceDecl>
                        (Reader.GetDecl(Record[Idx++])));
   
@@ -608,7 +609,7 @@ void ASTDeclReader::VisitObjCImplementationDecl(ObjCImplementationDecl *D) {
   D->setSuperClass(
               cast_or_null<ObjCInterfaceDecl>(Reader.GetDecl(Record[Idx++])));
   llvm::tie(D->IvarInitializers, D->NumIvarInitializers)
-      = Reader.ReadCXXBaseOrMemberInitializers(F, Record, Idx);
+      = Reader.ReadCXXCtorInitializers(F, Record, Idx);
   D->setHasSynthBitfield(Record[Idx++]);
 }
 
@@ -695,6 +696,22 @@ void ASTDeclReader::VisitBlockDecl(BlockDecl *BD) {
   for (unsigned I = 0; I != NumParams; ++I)
     Params.push_back(cast<ParmVarDecl>(Reader.GetDecl(Record[Idx++])));
   BD->setParams(Params.data(), NumParams);
+
+  bool capturesCXXThis = Record[Idx++];
+  unsigned numCaptures = Record[Idx++];
+  llvm::SmallVector<BlockDecl::Capture, 16> captures;
+  captures.reserve(numCaptures);
+  for (unsigned i = 0; i != numCaptures; ++i) {
+    VarDecl *decl = cast<VarDecl>(Reader.GetDecl(Record[Idx++]));
+    unsigned flags = Record[Idx++];
+    bool byRef = (flags & 1);
+    bool nested = (flags & 2);
+    Expr *copyExpr = ((flags & 4) ? Reader.ReadExpr(F) : 0);
+
+    captures.push_back(BlockDecl::Capture(decl, byRef, nested, copyExpr));
+  }
+  BD->setCaptures(*Reader.getContext(), captures.begin(),
+                  captures.end(), capturesCXXThis);
 }
 
 void ASTDeclReader::VisitLinkageSpecDecl(LinkageSpecDecl *D) {
@@ -796,6 +813,7 @@ void ASTDeclReader::ReadCXXDefinitionData(
   Data.DeclaredCopyConstructor = Record[Idx++];
   Data.DeclaredCopyAssignment = Record[Idx++];
   Data.DeclaredDestructor = Record[Idx++];
+
   Data.NumBases = Record[Idx++];
   if (Data.NumBases)
     Data.Bases = Reader.GetCXXBaseSpecifiersOffset(Record[Idx++]);
@@ -902,8 +920,8 @@ void ASTDeclReader::VisitCXXConstructorDecl(CXXConstructorDecl *D) {
   
   D->IsExplicitSpecified = Record[Idx++];
   D->ImplicitlyDefined = Record[Idx++];
-  llvm::tie(D->BaseOrMemberInitializers, D->NumBaseOrMemberInitializers)
-      = Reader.ReadCXXBaseOrMemberInitializers(F, Record, Idx);
+  llvm::tie(D->CtorInitializers, D->NumCtorInitializers)
+      = Reader.ReadCXXCtorInitializers(F, Record, Idx);
 }
 
 void ASTDeclReader::VisitCXXDestructorDecl(CXXDestructorDecl *D) {
@@ -1150,16 +1168,25 @@ void ASTDeclReader::VisitTemplateTypeParmDecl(TemplateTypeParmDecl *D) {
 }
 
 void ASTDeclReader::VisitNonTypeTemplateParmDecl(NonTypeTemplateParmDecl *D) {
-  VisitVarDecl(D);
+  VisitDeclaratorDecl(D);
   // TemplateParmPosition.
   D->setDepth(Record[Idx++]);
   D->setPosition(Record[Idx++]);
-  // Rest of NonTypeTemplateParmDecl.
-  if (Record[Idx++]) {
-    Expr *DefArg = Reader.ReadExpr(F);
-    bool Inherited = Record[Idx++];
-    D->setDefaultArgument(DefArg, Inherited);
- }
+  if (D->isExpandedParameterPack()) {
+    void **Data = reinterpret_cast<void **>(D + 1);
+    for (unsigned I = 0, N = D->getNumExpansionTypes(); I != N; ++I) {
+      Data[2*I] = Reader.GetType(Record[Idx++]).getAsOpaquePtr();
+      Data[2*I + 1] = GetTypeSourceInfo(Record, Idx);
+    }
+  } else {
+    // Rest of NonTypeTemplateParmDecl.
+    D->ParameterPack = Record[Idx++];
+    if (Record[Idx++]) {
+      Expr *DefArg = Reader.ReadExpr(F);
+      bool Inherited = Record[Idx++];
+      D->setDefaultArgument(DefArg, Inherited);
+   }
+  }
 }
 
 void ASTDeclReader::VisitTemplateTemplateParmDecl(TemplateTemplateParmDecl *D) {
@@ -1171,6 +1198,7 @@ void ASTDeclReader::VisitTemplateTemplateParmDecl(TemplateTemplateParmDecl *D) {
   TemplateArgumentLoc Arg = Reader.ReadTemplateArgumentLoc(F, Record, Idx);
   bool IsInherited = Record[Idx++];
   D->setDefaultArgument(Arg, IsInherited);
+  D->ParameterPack = Record[Idx++];
 }
 
 void ASTDeclReader::VisitStaticAssertDecl(StaticAssertDecl *D) {
@@ -1239,12 +1267,10 @@ void ASTReader::ReadAttributes(PerFileData &F, AttrVec &Attrs,
     Attr *New = 0;
     attr::Kind Kind = (attr::Kind)Record[Idx++];
     SourceLocation Loc = ReadSourceLocation(F, Record, Idx);
-    bool isInherited = Record[Idx++];
 
 #include "clang/Serialization/AttrPCHRead.inc"
 
     assert(New && "Unable to decode attribute?");
-    New->setInherited(isInherited);
     Attrs.push_back(New);
   }
 }
@@ -1428,10 +1454,16 @@ Decl *ASTReader::ReadDeclRecord(unsigned Index, DeclID ID) {
     break;
   case DECL_NON_TYPE_TEMPLATE_PARM:
     D = NonTypeTemplateParmDecl::Create(*Context, 0, SourceLocation(), 0,0,0,
-                                        QualType(),0);
+                                        QualType(), false, 0);
+    break;
+  case DECL_EXPANDED_NON_TYPE_TEMPLATE_PARM_PACK:
+    D = NonTypeTemplateParmDecl::Create(*Context, 0, SourceLocation(), 0, 0,
+                                        0, QualType(), 0, 0, Record[Idx++],
+                                        0);
     break;
   case DECL_TEMPLATE_TEMPLATE_PARM:
-    D = TemplateTemplateParmDecl::Create(*Context, 0, SourceLocation(),0,0,0,0);
+    D = TemplateTemplateParmDecl::Create(*Context, 0, SourceLocation(), 0, 0,
+                                         false, 0, 0);
     break;
   case DECL_STATIC_ASSERT:
     D = StaticAssertDecl::Create(*Context, 0, SourceLocation(), 0, 0);

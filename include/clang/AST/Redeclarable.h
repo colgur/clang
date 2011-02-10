@@ -110,7 +110,7 @@ public:
   /// \brief Set the previous declaration. If PrevDecl is NULL, set this as the
   /// first and only declaration.
   void setPreviousDeclaration(decl_type *PrevDecl);
-  
+
   /// \brief Iterates through all the redeclarations of the same decl.
   class redecl_iterator {
     /// Current - The current declaration.

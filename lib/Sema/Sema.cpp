@@ -139,8 +139,10 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
     IdResolver(pp.getLangOptions()), CXXTypeInfoDecl(0), MSVCGuidDecl(0),
     GlobalNewDeleteDeclared(false), 
     CompleteTranslationUnit(CompleteTranslationUnit),
-    NumSFINAEErrors(0), SuppressAccessChecking(false),
-    NonInstantiationEntries(0), CurrentInstantiationScope(0), TyposCorrected(0),
+    NumSFINAEErrors(0), SuppressAccessChecking(false), 
+    AccessCheckingSFINAE(false), InNonInstantiationSFINAEContext(false),
+    NonInstantiationEntries(0), ArgumentPackSubstitutionIndex(-1),
+    CurrentInstantiationScope(0), TyposCorrected(0),
     AnalysisWarnings(*this)
 {
   TUScope = 0;
@@ -203,15 +205,6 @@ void Sema::ImpCastExprToType(Expr *&Expr, QualType Ty,
 
   if (ExprTy == TypeTy)
     return;
-
-  if (Expr->getType()->isPointerType() && Ty->isPointerType()) {
-    QualType ExprBaseType = cast<PointerType>(ExprTy)->getPointeeType();
-    QualType BaseType = cast<PointerType>(TypeTy)->getPointeeType();
-    if (ExprBaseType.getAddressSpace() != BaseType.getAddressSpace()) {
-      Diag(Expr->getExprLoc(), diag::err_implicit_pointer_address_space_cast)
-        << Expr->getSourceRange();
-    }
-  }
 
   // If this is a derived-to-base cast to a through a virtual base, we
   // need a vtable.
@@ -285,6 +278,20 @@ void Sema::ActOnEndOfTranslationUnit() {
   // At PCH writing, implicit instantiations and VTable handling info are
   // stored and performed when the PCH is included.
   if (CompleteTranslationUnit) {
+    // If any dynamic classes have their key function defined within
+    // this translation unit, then those vtables are considered "used" and must
+    // be emitted.
+    for (unsigned I = 0, N = DynamicClasses.size(); I != N; ++I) {
+      assert(!DynamicClasses[I]->isDependentType() &&
+             "Should not see dependent types here!");
+      if (const CXXMethodDecl *KeyFunction
+          = Context.getKeyFunction(DynamicClasses[I])) {
+        const FunctionDecl *Definition = 0;
+        if (KeyFunction->hasBody(Definition))
+          MarkVTableUsed(Definition->getLocation(), DynamicClasses[I], true);
+      }
+    }
+
     // If DefinedUsedVTables ends up marking any virtual member functions it
     // might lead to more pending template instantiations, which we then need
     // to instantiate.
@@ -372,25 +379,29 @@ void Sema::ActOnEndOfTranslationUnit() {
       Consumer.CompleteTentativeDefinition(VD);
 
   }
-  
-  // Output warning for unused file scoped decls.
-  for (llvm::SmallVectorImpl<const DeclaratorDecl*>::iterator
-         I = UnusedFileScopedDecls.begin(),
-         E = UnusedFileScopedDecls.end(); I != E; ++I) {
-    if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(*I)) {
-      const FunctionDecl *DiagD;
-      if (!FD->hasBody(DiagD))
-        DiagD = FD;
-      Diag(DiagD->getLocation(),
-           isa<CXXMethodDecl>(DiagD) ? diag::warn_unused_member_function
-                                     : diag::warn_unused_function)
-            << DiagD->getDeclName();
-    } else {
-      const VarDecl *DiagD = cast<VarDecl>(*I)->getDefinition();
-      if (!DiagD)
-        DiagD = cast<VarDecl>(*I);
-      Diag(DiagD->getLocation(), diag::warn_unused_variable)
-            << DiagD->getDeclName();
+
+  // If there were errors, disable 'unused' warnings since they will mostly be
+  // noise.
+  if (!Diags.hasErrorOccurred()) {
+    // Output warning for unused file scoped decls.
+    for (llvm::SmallVectorImpl<const DeclaratorDecl*>::iterator
+           I = UnusedFileScopedDecls.begin(),
+           E = UnusedFileScopedDecls.end(); I != E; ++I) {
+      if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(*I)) {
+        const FunctionDecl *DiagD;
+        if (!FD->hasBody(DiagD))
+          DiagD = FD;
+        Diag(DiagD->getLocation(),
+             isa<CXXMethodDecl>(DiagD) ? diag::warn_unused_member_function
+                                       : diag::warn_unused_function)
+              << DiagD->getDeclName();
+      } else {
+        const VarDecl *DiagD = cast<VarDecl>(*I)->getDefinition();
+        if (!DiagD)
+          DiagD = cast<VarDecl>(*I);
+        Diag(DiagD->getLocation(), diag::warn_unused_variable)
+              << DiagD->getDeclName();
+      }
     }
   }
 
@@ -435,12 +446,18 @@ Sema::SemaDiagnosticBuilder::~SemaDiagnosticBuilder() {
   if (!isActive())
     return;
   
-  if (TemplateDeductionInfo *Info = SemaRef.isSFINAEContext()) {
+  if (llvm::Optional<TemplateDeductionInfo*> Info = SemaRef.isSFINAEContext()) {
     switch (DiagnosticIDs::getDiagnosticSFINAEResponse(getDiagID())) {
     case DiagnosticIDs::SFINAE_Report:
       // Fall through; we'll report the diagnostic below.
       break;
       
+    case DiagnosticIDs::SFINAE_AccessControl:
+      // Unless access checking is specifically called out as a SFINAE
+      // error, report this diagnostic.
+      if (!SemaRef.AccessCheckingSFINAE)
+        break;
+        
     case DiagnosticIDs::SFINAE_SubstitutionFailure:
       // Count this failure so that we know that template argument deduction
       // has failed.
@@ -456,7 +473,8 @@ Sema::SemaDiagnosticBuilder::~SemaDiagnosticBuilder() {
       FlushCounts();
       DiagnosticInfo DiagInfo(&SemaRef.Diags);
         
-      Info->addSuppressedDiagnostic(DiagInfo.getLocation(),
+      if (*Info)
+        (*Info)->addSuppressedDiagnostic(DiagInfo.getLocation(),
                         PartialDiagnostic(DiagInfo,
                                           SemaRef.Context.getDiagAllocator()));
         

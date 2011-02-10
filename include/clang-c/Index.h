@@ -1460,7 +1460,38 @@ CINDEX_LINKAGE enum CXLanguageKind {
  */
 CINDEX_LINKAGE enum CXLanguageKind clang_getCursorLanguage(CXCursor cursor);
 
-  
+
+/**
+ * \brief A fast container representing a set of CXCursors.
+ */
+typedef struct CXCursorSetImpl *CXCursorSet;
+
+/**
+ * \brief Creates an empty CXCursorSet.
+ */
+CINDEX_LINKAGE CXCursorSet clang_createCXCursorSet();
+
+/**
+ * \brief Disposes a CXCursorSet and releases its associated memory.
+ */
+CINDEX_LINKAGE void clang_disposeCXCursorSet(CXCursorSet cset);
+
+/**
+ * \brief Queries a CXCursorSet to see if it contains a specific CXCursor.
+ *
+ * \returns non-zero if the set contains the specified cursor.
+*/
+CINDEX_LINKAGE unsigned clang_CXCursorSet_contains(CXCursorSet cset,
+                                                   CXCursor cursor);
+
+/**
+ * \brief Inserts a CXCursor into a CXCursorSet.
+ *
+ * \returns zero if the CXCursor was already in the set, and non-zero otherwise.
+*/
+CINDEX_LINKAGE unsigned clang_CXCursorSet_insert(CXCursorSet cset,
+                                                 CXCursor cursor);
+
 /**
  * \brief Determine the semantic parent of the given cursor.
  *
@@ -1491,6 +1522,8 @@ CINDEX_LINKAGE enum CXLanguageKind clang_getCursorLanguage(CXCursor cursor);
  * In the example above, both declarations of \c C::f have \c C as their
  * semantic context, while the lexical context of the first \c C::f is \c C
  * and the lexical context of the second \c C::f is the translation unit.
+ *
+ * For global declarations, the semantic parent is the translation unit.
  */
 CINDEX_LINKAGE CXCursor clang_getCursorSemanticParent(CXCursor cursor);
 
@@ -1524,6 +1557,9 @@ CINDEX_LINKAGE CXCursor clang_getCursorSemanticParent(CXCursor cursor);
  * In the example above, both declarations of \c C::f have \c C as their
  * semantic context, while the lexical context of the first \c C::f is \c C
  * and the lexical context of the second \c C::f is the translation unit.
+ *
+ * For declarations written in the global scope, the lexical parent is
+ * the translation unit.
  */
 CINDEX_LINKAGE CXCursor clang_getCursorLexicalParent(CXCursor cursor);
 
@@ -1746,6 +1782,24 @@ CINDEX_LINKAGE unsigned clang_equalTypes(CXType A, CXType B);
 CINDEX_LINKAGE CXType clang_getCanonicalType(CXType T);
 
 /**
+ *  \determine Determine whether a CXType has the "const" qualifier set, 
+ *  without looking through typedefs that may have added "const" at a different level.
+ */
+CINDEX_LINKAGE unsigned clang_isConstQualifiedType(CXType T);
+
+/**
+ *  \determine Determine whether a CXType has the "volatile" qualifier set,
+ *  without looking through typedefs that may have added "volatile" at a different level.
+ */
+CINDEX_LINKAGE unsigned clang_isVolatileQualifiedType(CXType T);
+
+/**
+ *  \determine Determine whether a CXType has the "restrict" qualifier set,
+ *  without looking through typedefs that may have added "restrict" at a different level.
+ */
+CINDEX_LINKAGE unsigned clang_isRestrictQualifiedType(CXType T);
+
+/**
  * \brief For pointer types, returns the type of the pointee.
  *
  */
@@ -1756,6 +1810,10 @@ CINDEX_LINKAGE CXType clang_getPointeeType(CXType T);
  */
 CINDEX_LINKAGE CXCursor clang_getTypeDeclaration(CXType T);
 
+/**
+ * Returns the Objective-C type encoding for the specified declaration.
+ */
+CINDEX_LINKAGE CXString clang_getDeclObjCTypeEncoding(CXCursor C);
 
 /**
  * \brief Retrieve the spelling of a given CXTypeKind.

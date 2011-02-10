@@ -454,11 +454,6 @@ public:
   /// @name Output Files
   /// {
 
-  /// getOutputFileList - Get the list of (path, output stream) pairs of output
-  /// files; the path may be empty but the stream will always be non-null.
-  const std::list< std::pair<std::string,
-                             llvm::raw_ostream*> > &getOutputFileList() const;
-
   /// addOutputFile - Add an output file onto the list of tracked output files.
   ///
   /// \param OutFile - The output file info.
@@ -542,6 +537,7 @@ public:
   /// context.
   void createPCHExternalASTSource(llvm::StringRef Path,
                                   bool DisablePCHValidation,
+                                  bool DisableStatCache,
                                   void *DeserializationListener);
 
   /// Create an external AST source to read a PCH file.
@@ -550,6 +546,7 @@ public:
   static ExternalASTSource *
   createPCHExternalASTSource(llvm::StringRef Path, const std::string &Sysroot,
                              bool DisablePCHValidation,
+                             bool DisableStatCache,
                              Preprocessor &PP, ASTContext &Context,
                              void *DeserializationListener, bool Preamble);
 
@@ -588,7 +585,8 @@ public:
   ///
   /// \return - Null on error.
   llvm::raw_fd_ostream *
-  createOutputFile(llvm::StringRef OutputPath, bool Binary = true,
+  createOutputFile(llvm::StringRef OutputPath,
+                   bool Binary = true, bool RemoveFileOnSignal = true,
                    llvm::StringRef BaseInput = "",
                    llvm::StringRef Extension = "");
 
@@ -605,13 +603,17 @@ public:
   /// for deriving the output path.
   /// \param Extension - The extension to use for derived output names.
   /// \param Binary - The mode to open the file in.
+  /// \param RemoveFileOnSignal - Whether the file should be registered with
+  /// llvm::sys::RemoveFileOnSignal. Note that this is not safe for
+  /// multithreaded use, as the underlying signal mechanism is not reentrant
   /// \param ResultPathName [out] - If given, the result path name will be
   /// stored here on success.
   /// \param TempPathName [out] - If given, the temporary file path name
   /// will be stored here on success.
   static llvm::raw_fd_ostream *
   createOutputFile(llvm::StringRef OutputPath, std::string &Error,
-                   bool Binary = true, llvm::StringRef BaseInput = "",
+                   bool Binary = true, bool RemoveFileOnSignal = true,
+                   llvm::StringRef BaseInput = "",
                    llvm::StringRef Extension = "",
                    std::string *ResultPathName = 0,
                    std::string *TempPathName = 0);

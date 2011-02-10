@@ -142,11 +142,11 @@ void ConstStructBuilder::AppendBitField(const FieldDecl *Field,
   // constants are cast to bool, and because clang is not enforcing bitfield
   // width limits.
   if (FieldSize > FieldValue.getBitWidth())
-    FieldValue.zext(FieldSize);
+    FieldValue = FieldValue.zext(FieldSize);
 
   // Truncate the size of FieldValue to the bit field size.
   if (FieldSize < FieldValue.getBitWidth())
-    FieldValue.trunc(FieldSize);
+    FieldValue = FieldValue.trunc(FieldSize);
 
   if (FieldOffset < NextFieldOffsetInBytes * 8) {
     // Either part of the field or the entire field can go into the previous
@@ -166,20 +166,20 @@ void ConstStructBuilder::AppendBitField(const FieldDecl *Field,
 
       if (CGM.getTargetData().isBigEndian()) {
         Tmp = Tmp.lshr(NewFieldWidth);
-        Tmp.trunc(BitsInPreviousByte);
+        Tmp = Tmp.trunc(BitsInPreviousByte);
 
         // We want the remaining high bits.
-        FieldValue.trunc(NewFieldWidth);
+        FieldValue = FieldValue.trunc(NewFieldWidth);
       } else {
-        Tmp.trunc(BitsInPreviousByte);
+        Tmp = Tmp.trunc(BitsInPreviousByte);
 
         // We want the remaining low bits.
         FieldValue = FieldValue.lshr(BitsInPreviousByte);
-        FieldValue.trunc(NewFieldWidth);
+        FieldValue = FieldValue.trunc(NewFieldWidth);
       }
     }
 
-    Tmp.zext(8);
+    Tmp = Tmp.zext(8);
     if (CGM.getTargetData().isBigEndian()) {
       if (FitsCompletelyInPreviousByte)
         Tmp = Tmp.shl(BitsInPreviousByte - FieldValue.getBitWidth());
@@ -231,13 +231,10 @@ void ConstStructBuilder::AppendBitField(const FieldDecl *Field,
 
     if (CGM.getTargetData().isBigEndian()) {
       // We want the high bits.
-      Tmp = FieldValue;
-      Tmp = Tmp.lshr(Tmp.getBitWidth() - 8);
-      Tmp.trunc(8);
+      Tmp = FieldValue.lshr(Tmp.getBitWidth() - 8).trunc(8);
     } else {
       // We want the low bits.
-      Tmp = FieldValue;
-      Tmp.trunc(8);
+      Tmp = FieldValue.trunc(8);
 
       FieldValue = FieldValue.lshr(8);
     }
@@ -245,7 +242,7 @@ void ConstStructBuilder::AppendBitField(const FieldDecl *Field,
     Elements.push_back(llvm::ConstantInt::get(CGM.getLLVMContext(), Tmp));
     NextFieldOffsetInBytes++;
 
-    FieldValue.trunc(FieldValue.getBitWidth() - 8);
+    FieldValue = FieldValue.trunc(FieldValue.getBitWidth() - 8);
   }
 
   assert(FieldValue.getBitWidth() > 0 &&
@@ -257,10 +254,9 @@ void ConstStructBuilder::AppendBitField(const FieldDecl *Field,
     if (CGM.getTargetData().isBigEndian()) {
       unsigned BitWidth = FieldValue.getBitWidth();
 
-      FieldValue.zext(8);
-      FieldValue = FieldValue << (8 - BitWidth);
+      FieldValue = FieldValue.zext(8) << (8 - BitWidth);
     } else
-      FieldValue.zext(8);
+      FieldValue = FieldValue.zext(8);
   }
 
   // Append the last element.
@@ -372,7 +368,7 @@ bool ConstStructBuilder::Build(InitListExpr *ILE) {
     }
   }
 
-  uint64_t LayoutSizeInBytes = Layout.getSize() / 8;
+  uint64_t LayoutSizeInBytes = Layout.getSize().getQuantity();
 
   if (NextFieldOffsetInBytes > LayoutSizeInBytes) {
     // If the struct is bigger than the size of the record type,
@@ -398,9 +394,10 @@ bool ConstStructBuilder::Build(InitListExpr *ILE) {
   }
 
   // Append tail padding if necessary.
-  AppendTailPadding(Layout.getSize());
+  AppendTailPadding(
+    Layout.getSize().getQuantity() * CGM.getContext().getCharWidth());
 
-  assert(Layout.getSize() / 8 == NextFieldOffsetInBytes &&
+  assert(Layout.getSize().getQuantity() == NextFieldOffsetInBytes &&
          "Tail padding mismatch!");
 
   return true;
@@ -454,17 +451,10 @@ public:
   llvm::Constant *VisitCompoundLiteralExpr(CompoundLiteralExpr *E) {
     return Visit(E->getInitializer());
   }
-    
+
   llvm::Constant *VisitUnaryAddrOf(UnaryOperator *E) {
-    if (const MemberPointerType *MPT = 
-          E->getType()->getAs<MemberPointerType>()) {
-      DeclRefExpr *DRE = cast<DeclRefExpr>(E->getSubExpr());
-      NamedDecl *ND = DRE->getDecl();
-      if (MPT->isMemberFunctionPointer())
-        return CGM.getCXXABI().EmitMemberPointer(cast<CXXMethodDecl>(ND));
-      else 
-        return CGM.getCXXABI().EmitMemberPointer(cast<FieldDecl>(ND));
-    }
+    if (E->getType()->isMemberPointerType())
+      return CGM.getMemberPointerConstant(E);
 
     return 0;
   }
@@ -938,6 +928,38 @@ llvm::Constant *CodeGenModule::EmitConstantExpr(const Expr *E,
   return C;
 }
 
+static uint64_t getFieldOffset(ASTContext &C, const FieldDecl *field) {
+  const ASTRecordLayout &layout = C.getASTRecordLayout(field->getParent());
+  return layout.getFieldOffset(field->getFieldIndex());
+}
+    
+llvm::Constant *
+CodeGenModule::getMemberPointerConstant(const UnaryOperator *uo) {
+  // Member pointer constants always have a very particular form.
+  const MemberPointerType *type = cast<MemberPointerType>(uo->getType());
+  const ValueDecl *decl = cast<DeclRefExpr>(uo->getSubExpr())->getDecl();
+
+  // A member function pointer.
+  if (const CXXMethodDecl *method = dyn_cast<CXXMethodDecl>(decl))
+    return getCXXABI().EmitMemberPointer(method);
+
+  // Otherwise, a member data pointer.
+  uint64_t fieldOffset;
+  if (const FieldDecl *field = dyn_cast<FieldDecl>(decl))
+    fieldOffset = getFieldOffset(getContext(), field);
+  else {
+    const IndirectFieldDecl *ifield = cast<IndirectFieldDecl>(decl);
+
+    fieldOffset = 0;
+    for (IndirectFieldDecl::chain_iterator ci = ifield->chain_begin(),
+           ce = ifield->chain_end(); ci != ce; ++ci)
+      fieldOffset += getFieldOffset(getContext(), cast<FieldDecl>(*ci));
+  }
+
+  CharUnits chars = getContext().toCharUnitsFromBits((int64_t) fieldOffset);
+  return getCXXABI().EmitMemberDataPointer(type, chars);
+}
+
 static void
 FillInNullDataMemberPointers(CodeGenModule &CGM, QualType T,
                              std::vector<llvm::Constant *> &Elements,
@@ -1004,9 +1026,10 @@ FillInNullDataMemberPointers(CodeGenModule &CGM, QualType T,
     uint64_t StartIndex = StartOffset / 8;
     uint64_t EndIndex = StartIndex + CGM.getContext().getTypeSize(T) / 8;
 
+    // FIXME: hardcodes Itanium member pointer representation!
     llvm::Constant *NegativeOne =
       llvm::ConstantInt::get(llvm::Type::getInt8Ty(CGM.getLLVMContext()),
-                             -1ULL, /*isSigned=*/true);
+                             -1ULL, /*isSigned*/true);
 
     // Fill in the null data member pointer.
     for (uint64_t I = StartIndex; I != EndIndex; ++I)
@@ -1127,6 +1150,5 @@ llvm::Constant *CodeGenModule::EmitNullConstant(QualType T) {
   
   // Itanium C++ ABI 2.3:
   //   A NULL pointer is represented as -1.
-  return llvm::ConstantInt::get(getTypes().ConvertTypeForMem(T), -1ULL, 
-                                /*isSigned=*/true);
+  return getCXXABI().EmitNullMemberPointer(T->castAs<MemberPointerType>());
 }

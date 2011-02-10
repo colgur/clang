@@ -111,6 +111,7 @@ Sema::HandlePropertyInClassExtension(Scope *S, ObjCCategoryDecl *CDecl,
   
   // Create a new ObjCPropertyDecl with the DeclContext being
   // the class extension.
+  // FIXME. We should really be using CreatePropertyDecl for this.
   ObjCPropertyDecl *PDecl =
     ObjCPropertyDecl::Create(Context, DC, FD.D.getIdentifierLoc(),
                              PropertyId, AtLoc, T);
@@ -118,7 +119,9 @@ Sema::HandlePropertyInClassExtension(Scope *S, ObjCCategoryDecl *CDecl,
     PDecl->setPropertyAttributes(ObjCPropertyDecl::OBJC_PR_readonly);
   if (Attributes & ObjCDeclSpec::DQ_PR_readwrite)
     PDecl->setPropertyAttributes(ObjCPropertyDecl::OBJC_PR_readwrite);
-
+  // Set setter/getter selector name. Needed later.
+  PDecl->setGetterName(GetterSel);
+  PDecl->setSetterName(SetterSel);
   DC->addDecl(PDecl);
 
   // We need to look in the @interface to see if the @property was
@@ -296,6 +299,8 @@ ObjCPropertyDecl *Sema::CreatePropertyDecl(Scope *S,
 
   if (Attributes & ObjCDeclSpec::DQ_PR_nonatomic)
     PDecl->setPropertyAttributes(ObjCPropertyDecl::OBJC_PR_nonatomic);
+  else if (Attributes & ObjCDeclSpec::DQ_PR_atomic)
+    PDecl->setPropertyAttributes(ObjCPropertyDecl::OBJC_PR_atomic);
 
   PDecl->setPropertyAttributesAsWritten(PDecl->getPropertyAttributes());
   
@@ -346,6 +351,16 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
       Diag(PropertyLoc, diag::error_bad_property_decl) << IDecl->getDeclName();
       return 0;
     }
+    unsigned PIkind = property->getPropertyAttributesAsWritten();
+    if ((PIkind & (ObjCPropertyDecl::OBJC_PR_atomic |
+                   ObjCPropertyDecl::OBJC_PR_nonatomic) ) == 0) {
+      if (AtLoc.isValid())
+        Diag(AtLoc, diag::warn_implicit_atomic_property);
+      else
+        Diag(IC->getLocation(), diag::warn_auto_implicit_atomic_property);
+      Diag(property->getLocation(), diag::note_property_declare);
+    }
+    
     if (const ObjCCategoryDecl *CD =
         dyn_cast<ObjCCategoryDecl>(property->getDeclContext())) {
       if (!CD->IsClassExtension()) {
@@ -395,7 +410,7 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
     if (!Ivar) {
       Ivar = ObjCIvarDecl::Create(Context, ClassImpDecl, PropertyLoc,
                                   PropertyIvar, PropType, /*Dinfo=*/0,
-                                  ObjCIvarDecl::Protected,
+                                  ObjCIvarDecl::Private,
                                   (Expr *)0, true);
       ClassImpDecl->addDecl(Ivar);
       IDecl->makeDeclVisibleInContext(Ivar, false);
@@ -425,9 +440,13 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
           Context.canAssignObjCInterfaces(
                                   PropType->getAs<ObjCObjectPointerType>(),
                                   IvarType->getAs<ObjCObjectPointerType>());
-      else 
-        compat = (CheckAssignmentConstraints(PropType, IvarType)
+      else {
+        SourceLocation Loc = PropertyIvarLoc;
+        if (Loc.isInvalid())
+          Loc = PropertyLoc;
+        compat = (CheckAssignmentConstraints(Loc, PropType, IvarType)
                     == Compatible);
+      }
       if (!compat) {
         Diag(PropertyLoc, diag::error_property_ivar_type)
           << property->getDeclName() << PropType
@@ -500,7 +519,7 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
       if (!Res.isInvalid()) {
         Expr *ResExpr = Res.takeAs<Expr>();
         if (ResExpr)
-          ResExpr = MaybeCreateCXXExprWithTemporaries(ResExpr);
+          ResExpr = MaybeCreateExprWithCleanups(ResExpr);
         PIDecl->setGetterCXXConstructor(ResExpr);
       }
     }
@@ -544,11 +563,12 @@ Decl *Sema::ActOnPropertyImplDecl(Scope *S,
       return 0;
     }
     IC->addPropertyImplementation(PIDecl);
-    if (getLangOptions().ObjCNonFragileABI2) {
+    if (getLangOptions().ObjCDefaultSynthProperties &&
+        getLangOptions().ObjCNonFragileABI2) {
       // Diagnose if an ivar was lazily synthesdized due to a previous
       // use and if 1) property is @dynamic or 2) property is synthesized
       // but it requires an ivar of different name.
-      ObjCInterfaceDecl *ClassDeclared;
+      ObjCInterfaceDecl *ClassDeclared=0;
       ObjCIvarDecl *Ivar = 0;
       if (!Synthesize)
         Ivar = IDecl->lookupInstanceVariable(PropertyId, ClassDeclared);
@@ -647,7 +667,7 @@ bool Sema::DiagnosePropertyAccessorMismatch(ObjCPropertyDecl *property,
       GetterMethod->getResultType() != property->getType()) {
     AssignConvertType result = Incompatible;
     if (property->getType()->isObjCObjectPointerType())
-      result = CheckAssignmentConstraints(GetterMethod->getResultType(),
+      result = CheckAssignmentConstraints(Loc, GetterMethod->getResultType(),
                                           property->getType());
     if (result != Compatible) {
       Diag(Loc, diag::warn_accessor_property_type_mismatch)
@@ -1061,7 +1081,32 @@ Sema::AtomicPropertySetterGetterRules (ObjCImplDecl* IMPDecl,
        E = IDecl->prop_end();
        I != E; ++I) {
     ObjCPropertyDecl *Property = (*I);
+    ObjCMethodDecl *GetterMethod = 0;
+    ObjCMethodDecl *SetterMethod = 0;
+    bool LookedUpGetterSetter = false;
+
     unsigned Attributes = Property->getPropertyAttributes();
+    unsigned AttributesAsWrittern = Property->getPropertyAttributesAsWritten();
+
+    if (!(AttributesAsWrittern & ObjCPropertyDecl::OBJC_PR_atomic) &&
+        !(AttributesAsWrittern & ObjCPropertyDecl::OBJC_PR_nonatomic)) {
+      GetterMethod = IMPDecl->getInstanceMethod(Property->getGetterName());
+      SetterMethod = IMPDecl->getInstanceMethod(Property->getSetterName());
+      LookedUpGetterSetter = true;
+      if (GetterMethod) {
+        Diag(GetterMethod->getLocation(),
+             diag::warn_default_atomic_custom_getter_setter)
+          << Property->getIdentifier() << 0;
+        Diag(Property->getLocation(), diag::note_property_declare);
+      }
+      if (SetterMethod) {
+        Diag(SetterMethod->getLocation(),
+             diag::warn_default_atomic_custom_getter_setter)
+          << Property->getIdentifier() << 1;
+        Diag(Property->getLocation(), diag::note_property_declare);
+      }
+    }
+
     // We only care about readwrite atomic property.
     if ((Attributes & ObjCPropertyDecl::OBJC_PR_nonatomic) ||
         !(Attributes & ObjCPropertyDecl::OBJC_PR_readwrite))
@@ -1070,10 +1115,11 @@ Sema::AtomicPropertySetterGetterRules (ObjCImplDecl* IMPDecl,
          = IMPDecl->FindPropertyImplDecl(Property->getIdentifier())) {
       if (PIDecl->getPropertyImplementation() == ObjCPropertyImplDecl::Dynamic)
         continue;
-      ObjCMethodDecl *GetterMethod =
-        IMPDecl->getInstanceMethod(Property->getGetterName());
-      ObjCMethodDecl *SetterMethod =
-        IMPDecl->getInstanceMethod(Property->getSetterName());
+      if (!LookedUpGetterSetter) {
+        GetterMethod = IMPDecl->getInstanceMethod(Property->getGetterName());
+        SetterMethod = IMPDecl->getInstanceMethod(Property->getSetterName());
+        LookedUpGetterSetter = true;
+      }
       if ((GetterMethod && !SetterMethod) || (!GetterMethod && SetterMethod)) {
         SourceLocation MethodLoc =
           (GetterMethod ? GetterMethod->getLocation()
@@ -1310,6 +1356,7 @@ void Sema::CheckObjCPropertyAttributes(Decl *PDecl,
   }
 
   if (!(Attributes & ObjCDeclSpec::DQ_PR_copy)
+      &&!(Attributes & ObjCDeclSpec::DQ_PR_readonly)
       && getLangOptions().getGCMode() == LangOptions::GCOnly
       && PropertyTy->isBlockPointerType())
     Diag(Loc, diag::warn_objc_property_copy_missing_on_block);

@@ -111,10 +111,7 @@ bool Parser::isCXXSimpleDeclaration() {
   // We need tentative parsing...
 
   TentativeParsingAction PA(*this);
-
   TPR = TryParseSimpleDeclaration();
-  SourceLocation TentativeParseLoc = Tok.getLocation();
-
   PA.Revert();
 
   // In case of an error, let the declaration parsing code handle it.
@@ -461,6 +458,7 @@ bool Parser::isCXX0XAttributeSpecifier (bool CheckClosing,
 ///         abstract-declarator:
 ///           ptr-operator abstract-declarator[opt]
 ///           direct-abstract-declarator
+///           ...
 ///
 ///         direct-abstract-declarator:
 ///           direct-abstract-declarator[opt]
@@ -483,7 +481,7 @@ bool Parser::isCXX0XAttributeSpecifier (bool CheckClosing,
 ///           'volatile'
 ///
 ///         declarator-id:
-///           id-expression
+///           '...'[opt] id-expression
 ///
 ///         id-expression:
 ///           unqualified-id
@@ -508,6 +506,7 @@ Parser::TPResult Parser::TryParseDeclarator(bool mayBeAbstract,
         return TPResult::Error();
 
     if (Tok.is(tok::star) || Tok.is(tok::amp) || Tok.is(tok::caret) ||
+        Tok.is(tok::ampamp) ||
         (Tok.is(tok::annot_cxxscope) && NextToken().is(tok::star))) {
       // ptr-operator
       ConsumeToken();
@@ -522,7 +521,9 @@ Parser::TPResult Parser::TryParseDeclarator(bool mayBeAbstract,
 
   // direct-declarator:
   // direct-abstract-declarator:
-
+  if (Tok.is(tok::ellipsis))
+    ConsumeToken();
+  
   if ((Tok.is(tok::identifier) ||
        (Tok.is(tok::annot_cxxscope) && NextToken().is(tok::identifier))) &&
       mayHaveIdentifier) {
@@ -566,6 +567,10 @@ Parser::TPResult Parser::TryParseDeclarator(bool mayBeAbstract,
   while (1) {
     TPResult TPR(TPResult::Ambiguous());
 
+    // abstract-declarator: ...
+    if (Tok.is(tok::ellipsis))
+      ConsumeToken();
+
     if (Tok.is(tok::l_paren)) {
       // Check whether we have a function declarator or a possible ctor-style
       // initializer that follows the declarator. Note that ctor-style
@@ -604,6 +609,7 @@ Parser::isExpressionOrTypeSpecifierSimple(tok::TokenKind Kind) {
   case tok::l_square:
   case tok::l_paren:
   case tok::amp:
+  case tok::ampamp:
   case tok::star:
   case tok::plus:
   case tok::plusplus:
@@ -649,6 +655,7 @@ Parser::isExpressionOrTypeSpecifierSimple(tok::TokenKind Kind) {
   case tok::kw___is_abstract:
   case tok::kw___is_base_of:
   case tok::kw___is_class:
+  case tok::kw___is_convertible_to:
   case tok::kw___is_empty:
   case tok::kw___is_enum:
   case tok::kw___is_pod:
@@ -1119,10 +1126,11 @@ bool Parser::isCXXFunctionDeclarator(bool warnIfAmbiguous) {
 ///   parameter-declaration-list ',' parameter-declaration
 ///
 /// parameter-declaration:
-///   decl-specifier-seq declarator
-///   decl-specifier-seq declarator '=' assignment-expression
-///   decl-specifier-seq abstract-declarator[opt]
-///   decl-specifier-seq abstract-declarator[opt] '=' assignment-expression
+///   decl-specifier-seq declarator attributes[opt]
+///   decl-specifier-seq declarator attributes[opt] '=' assignment-expression
+///   decl-specifier-seq abstract-declarator[opt] attributes[opt]
+///   decl-specifier-seq abstract-declarator[opt] attributes[opt]
+///     '=' assignment-expression
 ///
 Parser::TPResult Parser::TryParseParameterDeclarationClause() {
 
@@ -1143,8 +1151,8 @@ Parser::TPResult Parser::TryParseParameterDeclarationClause() {
       return TPResult::True(); // '...' is a sign of a function declarator.
     }
 
-    if (getLang().Microsoft && Tok.is(tok::l_square))
-      ParseMicrosoftAttributes();
+    ParsedAttributes attrs;
+    MaybeParseMicrosoftAttributes(attrs);
 
     // decl-specifier-seq
     TPResult TPR = TryParseDeclarationSpecifier();
@@ -1157,11 +1165,15 @@ Parser::TPResult Parser::TryParseParameterDeclarationClause() {
     if (TPR != TPResult::Ambiguous())
       return TPR;
 
+    // [GNU] attributes[opt]
+    if (Tok.is(tok::kw___attribute))
+      return TPResult::True();
+
     if (Tok.is(tok::equal)) {
       // '=' assignment-expression
       // Parse through assignment-expression.
-      tok::TokenKind StopToks[3] ={ tok::comma, tok::ellipsis, tok::r_paren };
-      if (!SkipUntil(StopToks, 3, true/*StopAtSemi*/, true/*DontConsume*/))
+      tok::TokenKind StopToks[2] ={ tok::comma, tok::r_paren };
+      if (!SkipUntil(StopToks, 2, true/*StopAtSemi*/, true/*DontConsume*/))
         return TPResult::Error();
     }
 
@@ -1211,6 +1223,10 @@ Parser::TPResult Parser::TryParseFunctionDeclarator() {
          Tok.is(tok::kw_restrict)   )
     ConsumeToken();
 
+  // ref-qualifier[opt]
+  if (Tok.is(tok::amp) || Tok.is(tok::ampamp))
+    ConsumeToken();
+  
   // exception-specification
   if (Tok.is(tok::kw_throw)) {
     ConsumeToken();

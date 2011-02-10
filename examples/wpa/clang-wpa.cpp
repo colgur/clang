@@ -14,10 +14,10 @@
 
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceManager.h"
-#include "clang/Checker/PathSensitive/AnalysisManager.h"
-#include "clang/Checker/PathSensitive/GRExprEngine.h"
-#include "clang/Checker/PathSensitive/GRTransferFuncs.h"
-#include "clang/Checker/Checkers/LocalCheckers.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/AnalysisManager.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/ExprEngine.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/TransferFuncs.h"
+#include "clang/StaticAnalyzer/Checkers/LocalCheckers.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Index/CallGraph.h"
@@ -91,7 +91,9 @@ int main(int argc, char **argv) {
     = CompilerInstance::createDiagnostics(DiagOpts, argc, argv);
   for (unsigned i = 0, e = InputFilenames.size(); i != e; ++i) {
     const std::string &InFile = InputFilenames[i];
-    llvm::OwningPtr<ASTUnit> AST(ASTUnit::LoadFromASTFile(InFile, Diags));
+    llvm::OwningPtr<ASTUnit> AST(ASTUnit::LoadFromASTFile(InFile, Diags,
+                                                          FileSystemOptions(),
+                                                          false, 0, 0, true));
     if (!AST)
       return 1;
 
@@ -130,6 +132,7 @@ int main(int argc, char **argv) {
   Preprocessor &PP = TU->getPreprocessor();
 
   // Hard code options for now.
+  using namespace clang::ento;
   AnalysisManager AMgr(TU->getASTContext(), PP.getDiagnostics(),
                        PP.getLangOptions(), /* PathDiagnostic */ 0,
                        CreateRegionStoreManager,
@@ -138,11 +141,14 @@ int main(int argc, char **argv) {
                        /* VisualizeEG */ false, /* VisualizeEGUbi */ false,
                        /* PurgeDead */ true, /* EagerlyAssume */ false,
                        /* TrimGraph */ false, /* InlineCall */ true, 
-                       /* UseUnoptimizedCFG */ false);
+                       /* UseUnoptimizedCFG */ false,
+                       /* addImplicitDtors */ true,
+                       /* addInitializers */ false,
+                       /* reclaimeNodes */ true);
 
-  GRTransferFuncs* TF = MakeCFRefCountTF(AMgr.getASTContext(), /*GC*/false,
+  TransferFuncs* TF = MakeCFRefCountTF(AMgr.getASTContext(), /*GC*/false,
                                          AMgr.getLangOptions());
-  GRExprEngine Eng(AMgr, TF);
+  ExprEngine Eng(AMgr, TF);
 
   Eng.ExecuteWorkList(AMgr.getStackFrame(FD, TU), AMgr.getMaxNodes());
   

@@ -245,7 +245,7 @@ void Preprocessor::SkipExcludedConditionalBlock(SourceLocation IfTokenLoc,
 
     // If this isn't an identifier directive (e.g. is "# 1\n" or "#\n", or
     // something bogus), skip it.
-    if (Tok.isNot(tok::identifier)) {
+    if (Tok.isNot(tok::raw_identifier)) {
       CurPPLexer->ParsingPreprocessorDirective = false;
       // Restore comment saving mode.
       if (CurLexer) CurLexer->SetCommentRetentionState(KeepComments);
@@ -257,12 +257,8 @@ void Preprocessor::SkipExcludedConditionalBlock(SourceLocation IfTokenLoc,
     // to spell an i/e in a strange way that is another letter.  Skipping this
     // allows us to avoid looking up the identifier info for #define/#undef and
     // other common directives.
-    bool Invalid = false;
-    const char *RawCharData = SourceMgr.getCharacterData(Tok.getLocation(),
-                                                         &Invalid);
-    if (Invalid)
-      return;
-    
+    const char *RawCharData = Tok.getRawIdentifierData();
+
     char FirstChar = RawCharData[0];
     if (FirstChar >= 'a' && FirstChar <= 'z' &&
         FirstChar != 'i' && FirstChar != 'e') {
@@ -302,7 +298,10 @@ void Preprocessor::SkipExcludedConditionalBlock(SourceLocation IfTokenLoc,
         DiscardUntilEndOfDirective();
         CurPPLexer->pushConditionalLevel(Tok.getLocation(), /*wasskipping*/true,
                                        /*foundnonskip*/false,
-                                       /*fnddelse*/false);
+                                       /*foundelse*/false);
+
+        if (Callbacks)
+          Callbacks->Endif();
       }
     } else if (Directive[0] == 'e') {
       llvm::StringRef Sub = Directive.substr(1);
@@ -311,7 +310,7 @@ void Preprocessor::SkipExcludedConditionalBlock(SourceLocation IfTokenLoc,
         PPConditionalInfo CondInfo;
         CondInfo.WasSkipping = true; // Silence bogus warning.
         bool InCond = CurPPLexer->popConditionalLevel(CondInfo);
-        InCond = InCond;  // Silence warning in no-asserts mode.
+        (void)InCond;  // Silence warning in no-asserts mode.
         assert(!InCond && "Can't be skipping if not in a conditional!");
 
         // If we popped the outermost skipping block, we're done skipping!
@@ -330,6 +329,9 @@ void Preprocessor::SkipExcludedConditionalBlock(SourceLocation IfTokenLoc,
         // Note that we've seen a #else in this conditional.
         CondInfo.FoundElse = true;
 
+        if (Callbacks)
+          Callbacks->Else();
+
         // If the conditional is at the top level, and the #if block wasn't
         // entered, enter the #else block now.
         if (!CondInfo.WasSkipping && !CondInfo.FoundNonSkip) {
@@ -340,6 +342,7 @@ void Preprocessor::SkipExcludedConditionalBlock(SourceLocation IfTokenLoc,
         PPConditionalInfo &CondInfo = CurPPLexer->peekConditionalLevel();
 
         bool ShouldEnter;
+        const SourceLocation ConditionalBegin = CurPPLexer->getSourceLocation();
         // If this is in a skipping block or if we're already handled this #if
         // block, don't bother parsing the condition.
         if (CondInfo.WasSkipping || CondInfo.FoundNonSkip) {
@@ -354,9 +357,13 @@ void Preprocessor::SkipExcludedConditionalBlock(SourceLocation IfTokenLoc,
           ShouldEnter = EvaluateDirectiveExpression(IfNDefMacro);
           CurPPLexer->LexingRawMode = true;
         }
+        const SourceLocation ConditionalEnd = CurPPLexer->getSourceLocation();
 
         // If this is a #elif with a #else before it, report the error.
         if (CondInfo.FoundElse) Diag(Tok, diag::pp_err_elif_after_else);
+
+        if (Callbacks)
+          Callbacks->Elif(SourceRange(ConditionalBegin, ConditionalEnd));
 
         // If this condition is true, enter it!
         if (ShouldEnter) {
@@ -389,7 +396,7 @@ void Preprocessor::PTHSkipExcludedConditionalBlock() {
       // have been consumed by the PTHLexer.  Just pop off the condition level.
       PPConditionalInfo CondInfo;
       bool InCond = CurPTHLexer->popConditionalLevel(CondInfo);
-      InCond = InCond;  // Silence warning in no-asserts mode.
+      (void)InCond;  // Silence warning in no-asserts mode.
       assert(!InCond && "Can't be skipping if not in a conditional!");
       break;
     }
@@ -647,6 +654,12 @@ TryAgain:
     // Return the # and the token after it.
     Toks[0] = SavedHash;
     Toks[1] = Result;
+    
+    // If the second token is a hashhash token, then we need to translate it to
+    // unknown so the token lexer doesn't try to perform token pasting.
+    if (Result.is(tok::hashhash))
+      Toks[1].setKind(tok::unknown);
+    
     // Enter this token stream so that we re-lex the tokens.  Make sure to
     // enable macro expansion, in case the token after the # is an identifier
     // that is expanded.
@@ -1046,6 +1059,12 @@ bool Preprocessor::ConcatenateIncludeName(
   while (CurTok.isNot(tok::eom)) {
     End = CurTok.getLocation();
     
+    // FIXME: Provide code completion for #includes.
+    if (CurTok.is(tok::code_completion)) {
+      Lex(CurTok);
+      continue;
+    }
+
     // Append the spelling of this token to the buffer. If there was a space
     // before it, add it now.
     if (CurTok.hasLeadingSpace())
@@ -1498,11 +1517,6 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok) {
     }
   }
 
-  // If this is the primary source file, remember that this macro hasn't been
-  // used yet.
-  if (isInPrimaryFile())
-    MI->setIsUsed(false);
-
   MI->setDefinitionEndLoc(LastTok.getLocation());
 
   // Finally, if this identifier already had a macro defined for it, verify that
@@ -1513,7 +1527,7 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok) {
     // then don't bother calling MacroInfo::isIdenticalTo.
     if (!getDiagnostics().getSuppressSystemWarnings() ||
         !SourceMgr.isInSystemHeader(DefineTok.getLocation())) {
-      if (!OtherMI->isUsed())
+      if (!OtherMI->isUsed() && OtherMI->isWarnIfUnused())
         Diag(OtherMI->getDefinitionLoc(), diag::pp_macro_not_used);
 
       // Macros must be identical.  This means all tokens and whitespace
@@ -1525,10 +1539,22 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok) {
         Diag(OtherMI->getDefinitionLoc(), diag::note_previous_definition);
       }
     }
+    if (OtherMI->isWarnIfUnused())
+      WarnUnusedMacroLocs.erase(OtherMI->getDefinitionLoc());
     ReleaseMacroInfo(OtherMI);
   }
 
   setMacroInfo(MacroNameTok.getIdentifierInfo(), MI);
+
+  assert(!MI->isUsed());
+  // If we need warning for not using the macro, add its location in the
+  // warn-because-unused-macro set. If it gets used it will be removed from set.
+  if (isInPrimaryFile() && // don't warn for include'd macros.
+      Diags->getDiagnosticLevel(diag::pp_macro_not_used,
+                               MI->getDefinitionLoc()) != Diagnostic::Ignored) {
+    MI->setIsWarnIfUnused(true);
+    WarnUnusedMacroLocs.insert(MI->getDefinitionLoc());
+  }
 
   // If the callbacks want to know, tell them about the macro definition.
   if (Callbacks)
@@ -1562,6 +1588,9 @@ void Preprocessor::HandleUndefDirective(Token &UndefTok) {
   // If the callbacks want to know, tell them about the macro #undef.
   if (Callbacks)
     Callbacks->MacroUndefined(MacroNameTok, MI);
+
+  if (MI->isWarnIfUnused())
+    WarnUnusedMacroLocs.erase(MI->getDefinitionLoc());
 
   // Free macro definition.
   ReleaseMacroInfo(MI);
@@ -1615,7 +1644,7 @@ void Preprocessor::HandleIfdefDirective(Token &Result, bool isIfndef,
 
   // If there is a macro, process it.
   if (MI)  // Mark it used.
-    MI->setIsUsed(true);
+    markMacroAsUsed(MI);
 
   // Should we include the stuff contained by this directive?
   if (!MI == isIfndef) {

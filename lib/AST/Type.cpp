@@ -41,7 +41,8 @@ unsigned ConstantArrayType::getNumAddressingBits(ASTContext &Context,
                                                const llvm::APInt &NumElements) {
   llvm::APSInt SizeExtended(NumElements, true);
   unsigned SizeTypeBits = Context.getTypeSize(Context.getSizeType());
-  SizeExtended.extend(std::max(SizeTypeBits, SizeExtended.getBitWidth()) * 2);
+  SizeExtended = SizeExtended.extend(std::max(SizeTypeBits,
+                                              SizeExtended.getBitWidth()) * 2);
 
   uint64_t ElementSize
     = Context.getTypeSizeInChars(ElementType).getQuantity();
@@ -62,8 +63,20 @@ unsigned ConstantArrayType::getMaxSizeBits(ASTContext &Context) {
   return Bits;
 }
 
+DependentSizedArrayType::DependentSizedArrayType(const ASTContext &Context, 
+                                                 QualType et, QualType can,
+                                                 Expr *e, ArraySizeModifier sm,
+                                                 unsigned tq,
+                                                 SourceRange brackets)
+    : ArrayType(DependentSizedArray, et, can, sm, tq, 
+                (et->containsUnexpandedParameterPack() ||
+                 (e && e->containsUnexpandedParameterPack()))),
+      Context(Context), SizeExpr((Stmt*) e), Brackets(brackets) 
+{
+}
+
 void DependentSizedArrayType::Profile(llvm::FoldingSetNodeID &ID,
-                                      ASTContext &Context,
+                                      const ASTContext &Context,
                                       QualType ET,
                                       ArraySizeModifier SizeMod,
                                       unsigned TypeQuals,
@@ -74,12 +87,49 @@ void DependentSizedArrayType::Profile(llvm::FoldingSetNodeID &ID,
   E->Profile(ID, Context, true);
 }
 
+DependentSizedExtVectorType::DependentSizedExtVectorType(const
+                                                         ASTContext &Context,
+                                                         QualType ElementType,
+                                                         QualType can, 
+                                                         Expr *SizeExpr, 
+                                                         SourceLocation loc)
+    : Type(DependentSizedExtVector, can, /*Dependent=*/true,
+           ElementType->isVariablyModifiedType(), 
+           (ElementType->containsUnexpandedParameterPack() ||
+            (SizeExpr && SizeExpr->containsUnexpandedParameterPack()))),
+      Context(Context), SizeExpr(SizeExpr), ElementType(ElementType),
+      loc(loc) 
+{
+}
+
 void
 DependentSizedExtVectorType::Profile(llvm::FoldingSetNodeID &ID,
-                                     ASTContext &Context,
+                                     const ASTContext &Context,
                                      QualType ElementType, Expr *SizeExpr) {
   ID.AddPointer(ElementType.getAsOpaquePtr());
   SizeExpr->Profile(ID, Context, true);
+}
+
+VectorType::VectorType(QualType vecType, unsigned nElements, QualType canonType,
+                       VectorKind vecKind)
+  : Type(Vector, canonType, vecType->isDependentType(),
+         vecType->isVariablyModifiedType(),
+         vecType->containsUnexpandedParameterPack()),
+    ElementType(vecType) 
+{
+  VectorTypeBits.VecKind = vecKind;
+  VectorTypeBits.NumElements = nElements;
+}
+
+VectorType::VectorType(TypeClass tc, QualType vecType, unsigned nElements,
+                       QualType canonType, VectorKind vecKind)
+  : Type(tc, canonType, vecType->isDependentType(),
+         vecType->isVariablyModifiedType(),
+         vecType->containsUnexpandedParameterPack()), 
+    ElementType(vecType) 
+{
+  VectorTypeBits.VecKind = vecKind;
+  VectorTypeBits.NumElements = nElements;
 }
 
 /// getArrayElementTypeNoTypeQual - If this is an array type, return the
@@ -100,51 +150,18 @@ const Type *Type::getArrayElementTypeNoTypeQual() const {
     ->getElementType().getTypePtr();
 }
 
-/// \brief Retrieve the unqualified variant of the given type, removing as
-/// little sugar as possible.
-///
-/// This routine looks through various kinds of sugar to find the 
-/// least-desuraged type that is unqualified. For example, given:
-///
-/// \code
-/// typedef int Integer;
-/// typedef const Integer CInteger;
-/// typedef CInteger DifferenceType;
-/// \endcode
-///
-/// Executing \c getUnqualifiedTypeSlow() on the type \c DifferenceType will
-/// desugar until we hit the type \c Integer, which has no qualifiers on it.
-QualType QualType::getUnqualifiedTypeSlow() const {
-  QualType Cur = *this;
-  while (true) {
-    if (!Cur.hasQualifiers())
-      return Cur;
-    
-    const Type *CurTy = Cur.getTypePtr();
-    switch (CurTy->getTypeClass()) {
-#define ABSTRACT_TYPE(Class, Parent)
-#define TYPE(Class, Parent)                                  \
-    case Type::Class: {                                      \
-      const Class##Type *Ty = cast<Class##Type>(CurTy);      \
-      if (!Ty->isSugared())                                  \
-        return Cur.getLocalUnqualifiedType();                \
-      Cur = Ty->desugar();                                   \
-      break;                                                 \
-    }
-#include "clang/AST/TypeNodes.def"
-    }
-  }
-  
-  return Cur.getUnqualifiedType();
-}
-
 /// getDesugaredType - Return the specified type with any "sugar" removed from
 /// the type.  This takes off typedefs, typeof's etc.  If the outer level of
 /// the type is already concrete, it returns it unmodified.  This is similar
 /// to getting the canonical type, but it doesn't remove *all* typedefs.  For
 /// example, it returns "T*" as "T*", (not as "int*"), because the pointer is
 /// concrete.
-QualType QualType::getDesugaredType(QualType T) {
+QualType QualType::getDesugaredType(QualType T, const ASTContext &Context) {
+  SplitQualType split = getSplitDesugaredType(T);
+  return Context.getQualifiedType(split.first, split.second);
+}
+
+SplitQualType QualType::getSplitDesugaredType(QualType T) {
   QualifierCollector Qs;
 
   QualType Cur = T;
@@ -156,13 +173,59 @@ QualType QualType::getDesugaredType(QualType T) {
     case Type::Class: { \
       const Class##Type *Ty = cast<Class##Type>(CurTy); \
       if (!Ty->isSugared()) \
-        return Qs.apply(Cur); \
+        return SplitQualType(Ty, Qs); \
       Cur = Ty->desugar(); \
       break; \
     }
 #include "clang/AST/TypeNodes.def"
     }
   }
+}
+
+SplitQualType QualType::getSplitUnqualifiedTypeImpl(QualType type) {
+  SplitQualType split = type.split();
+
+  // All the qualifiers we've seen so far.
+  Qualifiers quals = split.second;
+
+  // The last type node we saw with any nodes inside it.
+  const Type *lastTypeWithQuals = split.first;
+
+  while (true) {
+    QualType next;
+
+    // Do a single-step desugar, aborting the loop if the type isn't
+    // sugared.
+    switch (split.first->getTypeClass()) {
+#define ABSTRACT_TYPE(Class, Parent)
+#define TYPE(Class, Parent) \
+    case Type::Class: { \
+      const Class##Type *ty = cast<Class##Type>(split.first); \
+      if (!ty->isSugared()) goto done; \
+      next = ty->desugar(); \
+      break; \
+    }
+#include "clang/AST/TypeNodes.def"
+    }
+
+    // Otherwise, split the underlying type.  If that yields qualifiers,
+    // update the information.
+    split = next.split();
+    if (!split.second.empty()) {
+      lastTypeWithQuals = split.first;
+      quals.addConsistentQualifiers(split.second);
+    }
+  }
+
+ done:
+  return SplitQualType(lastTypeWithQuals, quals);
+}
+
+QualType QualType::IgnoreParens(QualType T) {
+  // FIXME: this seems inherently un-qualifiers-safe.
+  while (const ParenType *PT = T->getAs<ParenType>())
+    T = PT->getInnerType();
+  return T;
 }
 
 /// getUnqualifiedDesugaredType - Pull any qualifiers and syntactic
@@ -309,8 +372,9 @@ const RecordType *Type::getAsUnionType() const {
 ObjCObjectType::ObjCObjectType(QualType Canonical, QualType Base,
                                ObjCProtocolDecl * const *Protocols,
                                unsigned NumProtocols)
-  : Type(ObjCObject, Canonical, false, false),
-    BaseType(Base) {
+  : Type(ObjCObject, Canonical, false, false, false),
+    BaseType(Base) 
+{
   ObjCObjectTypeBits.NumProtocols = NumProtocols;
   assert(getNumProtocols() == NumProtocols &&
          "bitfield overflow in protocol count");
@@ -463,20 +527,28 @@ bool Type::isCharType() const {
 
 bool Type::isWideCharType() const {
   if (const BuiltinType *BT = dyn_cast<BuiltinType>(CanonicalType))
-    return BT->getKind() == BuiltinType::WChar;
+    return BT->getKind() == BuiltinType::WChar_S ||
+           BT->getKind() == BuiltinType::WChar_U;
   return false;
 }
 
 /// \brief Determine whether this type is any of the built-in character
 /// types.
 bool Type::isAnyCharacterType() const {
-  if (const BuiltinType *BT = dyn_cast<BuiltinType>(CanonicalType))
-    return (BT->getKind() >= BuiltinType::Char_U &&
-            BT->getKind() <= BuiltinType::Char32) ||
-           (BT->getKind() >= BuiltinType::Char_S &&
-            BT->getKind() <= BuiltinType::WChar);
-  
-  return false;
+  const BuiltinType *BT = dyn_cast<BuiltinType>(CanonicalType);
+  if (BT == 0) return false;
+  switch (BT->getKind()) {
+  default: return false;
+  case BuiltinType::Char_U:
+  case BuiltinType::UChar:
+  case BuiltinType::WChar_U:
+  case BuiltinType::Char16:
+  case BuiltinType::Char32:
+  case BuiltinType::Char_S:
+  case BuiltinType::SChar:
+  case BuiltinType::WChar_S:
+    return true;
+  }
 }
 
 /// isSignedIntegerType - Return true if this is an integer type that is
@@ -912,17 +984,22 @@ DependentTemplateSpecializationType::DependentTemplateSpecializationType(
                          unsigned NumArgs, const TemplateArgument *Args,
                          QualType Canon)
   : TypeWithKeyword(Keyword, DependentTemplateSpecialization, Canon, true,
-                    false),
+                    /*VariablyModified=*/false,
+                    NNS->containsUnexpandedParameterPack()),
     NNS(NNS), Name(Name), NumArgs(NumArgs) {
   assert(NNS && NNS->isDependent() &&
          "DependentTemplateSpecializatonType requires dependent qualifier");
-  for (unsigned I = 0; I != NumArgs; ++I)
+  for (unsigned I = 0; I != NumArgs; ++I) {
+    if (Args[I].containsUnexpandedParameterPack())
+      setContainsUnexpandedParameterPack();
+
     new (&getArgBuffer()[I]) TemplateArgument(Args[I]);
+  }
 }
 
 void
 DependentTemplateSpecializationType::Profile(llvm::FoldingSetNodeID &ID,
-                                             ASTContext &Context,
+                                             const ASTContext &Context,
                                              ElaboratedTypeKeyword Keyword,
                                              NestedNameSpecifier *Qualifier,
                                              const IdentifierInfo *Name,
@@ -982,7 +1059,8 @@ const char *BuiltinType::getName(const LangOptions &LO) const {
   case Float:             return "float";
   case Double:            return "double";
   case LongDouble:        return "long double";
-  case WChar:             return "wchar_t";
+  case WChar_S:
+  case WChar_U:           return "wchar_t";
   case Char16:            return "char16_t";
   case Char32:            return "char32_t";
   case NullPtr:           return "nullptr_t";
@@ -1031,87 +1109,71 @@ llvm::StringRef FunctionType::getNameForCallConv(CallingConv CC) {
   return "";
 }
 
-FunctionProtoType::FunctionProtoType(QualType Result, const QualType *ArgArray,
-                                     unsigned numArgs, bool isVariadic, 
-                                     unsigned typeQuals, bool hasExs,
-                                     bool hasAnyExs, const QualType *ExArray,
-                                     unsigned numExs, QualType Canonical,
-                                     const ExtInfo &Info)
-  : FunctionType(FunctionProto, Result, isVariadic, typeQuals, Canonical,
-                 Result->isDependentType(),
-                 Result->isVariablyModifiedType(),
-                 Info),
-    NumArgs(numArgs), NumExceptions(numExs), HasExceptionSpec(hasExs),
-    AnyExceptionSpec(hasAnyExs) 
+FunctionProtoType::FunctionProtoType(QualType result, const QualType *args,
+                                     unsigned numArgs, QualType canonical,
+                                     const ExtProtoInfo &epi)
+  : FunctionType(FunctionProto, result, epi.Variadic, epi.TypeQuals, 
+                 epi.RefQualifier, canonical,
+                 result->isDependentType(),
+                 result->isVariablyModifiedType(),
+                 result->containsUnexpandedParameterPack(),
+                 epi.ExtInfo),
+    NumArgs(numArgs), NumExceptions(epi.NumExceptions),
+    HasExceptionSpec(epi.HasExceptionSpec),
+    HasAnyExceptionSpec(epi.HasAnyExceptionSpec)
 {
   // Fill in the trailing argument array.
-  QualType *ArgInfo = reinterpret_cast<QualType*>(this+1);
+  QualType *argSlot = reinterpret_cast<QualType*>(this+1);
   for (unsigned i = 0; i != numArgs; ++i) {
-    if (ArgArray[i]->isDependentType())
+    if (args[i]->isDependentType())
       setDependent();
-    
-    ArgInfo[i] = ArgArray[i];
+
+    if (args[i]->containsUnexpandedParameterPack())
+      setContainsUnexpandedParameterPack();
+
+    argSlot[i] = args[i];
   }
   
   // Fill in the exception array.
-  QualType *Ex = ArgInfo + numArgs;
-  for (unsigned i = 0; i != numExs; ++i)
-    Ex[i] = ExArray[i];
+  QualType *exnSlot = argSlot + numArgs;
+  for (unsigned i = 0, e = epi.NumExceptions; i != e; ++i) {
+    if (epi.Exceptions[i]->isDependentType())
+      setDependent();
+
+    if (epi.Exceptions[i]->containsUnexpandedParameterPack())
+      setContainsUnexpandedParameterPack();
+
+    exnSlot[i] = epi.Exceptions[i];
+  }
 }
 
+bool FunctionProtoType::isTemplateVariadic() const {
+  for (unsigned ArgIdx = getNumArgs(); ArgIdx; --ArgIdx)
+    if (isa<PackExpansionType>(getArgType(ArgIdx - 1)))
+      return true;
+  
+  return false;
+}
 
 void FunctionProtoType::Profile(llvm::FoldingSetNodeID &ID, QualType Result,
-                                arg_type_iterator ArgTys,
-                                unsigned NumArgs, bool isVariadic,
-                                unsigned TypeQuals, bool hasExceptionSpec,
-                                bool anyExceptionSpec, unsigned NumExceptions,
-                                exception_iterator Exs,
-                                FunctionType::ExtInfo Info) {
+                                const QualType *ArgTys, unsigned NumArgs,
+                                const ExtProtoInfo &epi) {
   ID.AddPointer(Result.getAsOpaquePtr());
   for (unsigned i = 0; i != NumArgs; ++i)
     ID.AddPointer(ArgTys[i].getAsOpaquePtr());
-  ID.AddInteger(isVariadic);
-  ID.AddInteger(TypeQuals);
-  ID.AddInteger(hasExceptionSpec);
-  if (hasExceptionSpec) {
-    ID.AddInteger(anyExceptionSpec);
-    for (unsigned i = 0; i != NumExceptions; ++i)
-      ID.AddPointer(Exs[i].getAsOpaquePtr());
+  ID.AddBoolean(epi.Variadic);
+  ID.AddInteger(epi.TypeQuals);
+  ID.AddInteger(epi.RefQualifier);
+  if (epi.HasExceptionSpec) {
+    ID.AddBoolean(epi.HasAnyExceptionSpec);
+    for (unsigned i = 0; i != epi.NumExceptions; ++i)
+      ID.AddPointer(epi.Exceptions[i].getAsOpaquePtr());
   }
-  Info.Profile(ID);
+  epi.ExtInfo.Profile(ID);
 }
 
 void FunctionProtoType::Profile(llvm::FoldingSetNodeID &ID) {
-  Profile(ID, getResultType(), arg_type_begin(), NumArgs, isVariadic(),
-          getTypeQuals(), hasExceptionSpec(), hasAnyExceptionSpec(),
-          getNumExceptions(), exception_begin(),
-          getExtInfo());
-}
-
-/// LookThroughTypedefs - Return the ultimate type this typedef corresponds to
-/// potentially looking through *all* consequtive typedefs.  This returns the
-/// sum of the type qualifiers, so if you have:
-///   typedef const int A;
-///   typedef volatile A B;
-/// looking through the typedefs for B will give you "const volatile A".
-///
-QualType TypedefType::LookThroughTypedefs() const {
-  // Usually, there is only a single level of typedefs, be fast in that case.
-  QualType FirstType = getDecl()->getUnderlyingType();
-  if (!isa<TypedefType>(FirstType))
-    return FirstType;
-
-  // Otherwise, do the fully general loop.
-  QualifierCollector Qs;
-
-  QualType CurType;
-  const TypedefType *TDT = this;
-  do {
-    CurType = TDT->getDecl()->getUnderlyingType();
-    TDT = dyn_cast<TypedefType>(Qs.strip(CurType));
-  } while (TDT);
-
-  return Qs.apply(CurType);
+  Profile(ID, getResultType(), arg_type_begin(), NumArgs, getExtProtoInfo());
 }
 
 QualType TypedefType::desugar() const {
@@ -1120,7 +1182,9 @@ QualType TypedefType::desugar() const {
 
 TypeOfExprType::TypeOfExprType(Expr *E, QualType can)
   : Type(TypeOfExpr, can, E->isTypeDependent(), 
-         E->getType()->isVariablyModifiedType()), TOExpr(E) {
+         E->getType()->isVariablyModifiedType(),
+         E->containsUnexpandedParameterPack()), 
+    TOExpr(E) {
 }
 
 QualType TypeOfExprType::desugar() const {
@@ -1128,26 +1192,29 @@ QualType TypeOfExprType::desugar() const {
 }
 
 void DependentTypeOfExprType::Profile(llvm::FoldingSetNodeID &ID,
-                                      ASTContext &Context, Expr *E) {
+                                      const ASTContext &Context, Expr *E) {
   E->Profile(ID, Context, true);
 }
 
 DecltypeType::DecltypeType(Expr *E, QualType underlyingType, QualType can)
   : Type(Decltype, can, E->isTypeDependent(), 
-         E->getType()->isVariablyModifiedType()), E(E),
+         E->getType()->isVariablyModifiedType(), 
+         E->containsUnexpandedParameterPack()), 
+    E(E),
   UnderlyingType(underlyingType) {
 }
 
-DependentDecltypeType::DependentDecltypeType(ASTContext &Context, Expr *E)
+DependentDecltypeType::DependentDecltypeType(const ASTContext &Context, Expr *E)
   : DecltypeType(E, Context.DependentTy), Context(Context) { }
 
 void DependentDecltypeType::Profile(llvm::FoldingSetNodeID &ID,
-                                    ASTContext &Context, Expr *E) {
+                                    const ASTContext &Context, Expr *E) {
   E->Profile(ID, Context, true);
 }
 
 TagType::TagType(TypeClass TC, const TagDecl *D, QualType can)
-  : Type(TC, can, D->isDependentType(), /*VariablyModified=*/false),
+  : Type(TC, can, D->isDependentType(), /*VariablyModified=*/false, 
+         /*ContainsUnexpandedParameterPack=*/false),
     decl(const_cast<TagDecl*>(D)) {}
 
 static TagDecl *getInterestingTagDecl(TagDecl *decl) {
@@ -1181,43 +1248,32 @@ bool EnumType::classof(const TagType *TT) {
   return isa<EnumDecl>(TT->getDecl());
 }
 
-static bool isDependent(const TemplateArgument &Arg) {
-  switch (Arg.getKind()) {
-  case TemplateArgument::Null:
-    assert(false && "Should not have a NULL template argument");
-    return false;
+SubstTemplateTypeParmPackType::
+SubstTemplateTypeParmPackType(const TemplateTypeParmType *Param, 
+                              QualType Canon,
+                              const TemplateArgument &ArgPack)
+  : Type(SubstTemplateTypeParmPack, Canon, true, false, true), Replaced(Param), 
+    Arguments(ArgPack.pack_begin()), NumArguments(ArgPack.pack_size()) 
+{ 
+}
 
-  case TemplateArgument::Type:
-    return Arg.getAsType()->isDependentType();
+TemplateArgument SubstTemplateTypeParmPackType::getArgumentPack() const {
+  return TemplateArgument(Arguments, NumArguments);
+}
 
-  case TemplateArgument::Template:
-    return Arg.getAsTemplate().isDependent();
-      
-  case TemplateArgument::Declaration:
-    if (DeclContext *DC = dyn_cast<DeclContext>(Arg.getAsDecl()))
-      return DC->isDependentContext();
-    return Arg.getAsDecl()->getDeclContext()->isDependentContext();
+void SubstTemplateTypeParmPackType::Profile(llvm::FoldingSetNodeID &ID) {
+  Profile(ID, getReplacedParameter(), getArgumentPack());
+}
 
-  case TemplateArgument::Integral:
-    // Never dependent
-    return false;
-
-  case TemplateArgument::Expression:
-    return (Arg.getAsExpr()->isTypeDependent() ||
-            Arg.getAsExpr()->isValueDependent());
-
-  case TemplateArgument::Pack:
-    for (TemplateArgument::pack_iterator P = Arg.pack_begin(), 
-                                      PEnd = Arg.pack_end();
-         P != PEnd; ++P) {
-      if (isDependent(*P))
-        return true;
-    }
-
-    return false;
-  }
-
-  return false;
+void SubstTemplateTypeParmPackType::Profile(llvm::FoldingSetNodeID &ID,
+                                           const TemplateTypeParmType *Replaced,
+                                            const TemplateArgument &ArgPack) {
+  ID.AddPointer(Replaced);
+  ID.AddInteger(ArgPack.pack_size());
+  for (TemplateArgument::pack_iterator P = ArgPack.pack_begin(), 
+                                    PEnd = ArgPack.pack_end();
+       P != PEnd; ++P)
+    ID.AddPointer(P->getAsType().getAsOpaquePtr());
 }
 
 bool TemplateSpecializationType::
@@ -1228,7 +1284,7 @@ anyDependentTemplateArguments(const TemplateArgumentListInfo &Args) {
 bool TemplateSpecializationType::
 anyDependentTemplateArguments(const TemplateArgumentLoc *Args, unsigned N) {
   for (unsigned i = 0; i != N; ++i)
-    if (isDependent(Args[i].getArgument()))
+    if (Args[i].getArgument().isDependent())
       return true;
   return false;
 }
@@ -1236,7 +1292,7 @@ anyDependentTemplateArguments(const TemplateArgumentLoc *Args, unsigned N) {
 bool TemplateSpecializationType::
 anyDependentTemplateArguments(const TemplateArgument *Args, unsigned N) {
   for (unsigned i = 0; i != N; ++i)
-    if (isDependent(Args[i]))
+    if (Args[i].isDependent())
       return true;
   return false;
 }
@@ -1247,7 +1303,8 @@ TemplateSpecializationType(TemplateName T,
                            unsigned NumArgs, QualType Canon)
   : Type(TemplateSpecialization,
          Canon.isNull()? QualType(this, 0) : Canon,
-         T.isDependent(), false),
+         T.isDependent(), false,
+         T.containsUnexpandedParameterPack()),
     Template(T), NumArgs(NumArgs) 
 {
   assert((!Canon.isNull() ||
@@ -1258,12 +1315,14 @@ TemplateSpecializationType(TemplateName T,
     = reinterpret_cast<TemplateArgument *>(this + 1);
   for (unsigned Arg = 0; Arg < NumArgs; ++Arg) {
     // Update dependent and variably-modified bits.
-    if (isDependent(Args[Arg]))
+    if (Args[Arg].isDependent())
       setDependent();
     if (Args[Arg].getKind() == TemplateArgument::Type &&
         Args[Arg].getAsType()->isVariablyModifiedType())
       setVariablyModified();
-    
+    if (Args[Arg].containsUnexpandedParameterPack())
+      setContainsUnexpandedParameterPack();
+
     new (&TemplateArgs[Arg]) TemplateArgument(Args[Arg]);
   }
 }
@@ -1273,26 +1332,26 @@ TemplateSpecializationType::Profile(llvm::FoldingSetNodeID &ID,
                                     TemplateName T,
                                     const TemplateArgument *Args,
                                     unsigned NumArgs,
-                                    ASTContext &Context) {
+                                    const ASTContext &Context) {
   T.Profile(ID);
   for (unsigned Idx = 0; Idx < NumArgs; ++Idx)
     Args[Idx].Profile(ID, Context);
 }
 
-QualType QualifierCollector::apply(QualType QT) const {
+QualType
+QualifierCollector::apply(const ASTContext &Context, QualType QT) const {
   if (!hasNonFastQualifiers())
     return QT.withFastQualifiers(getFastQualifiers());
 
-  assert(Context && "extended qualifiers but no context!");
-  return Context->getQualifiedType(QT, *this);
+  return Context.getQualifiedType(QT, *this);
 }
 
-QualType QualifierCollector::apply(const Type *T) const {
+QualType
+QualifierCollector::apply(const ASTContext &Context, const Type *T) const {
   if (!hasNonFastQualifiers())
     return QualType(T, getFastQualifiers());
 
-  assert(Context && "extended qualifiers but no context!");
-  return Context->getQualifiedType(T, *this);
+  return Context.getQualifiedType(T, *this);
 }
 
 void ObjCObjectTypeImpl::Profile(llvm::FoldingSetNodeID &ID,
@@ -1357,8 +1416,8 @@ public:
 
     // If this type is non-canonical, ask its canonical type for the
     // relevant information.
-    if (QualType(T, 0) != T->CanonicalType) {
-      const Type *CT = T->CanonicalType.getTypePtr();
+    if (!T->isCanonicalUnqualified()) {
+      const Type *CT = T->getCanonicalTypeInternal().getTypePtr();
       ensure(CT);
       T->TypeBits.CacheValidAndVisibility =
         CT->TypeBits.CacheValidAndVisibility;
@@ -1498,4 +1557,22 @@ void Type::ClearLinkageCache() {
   TypeBits.CacheValidAndVisibility = 0;
   if (QualType(this, 0) != CanonicalType)
     CanonicalType->TypeBits.CacheValidAndVisibility = 0;
+}
+
+bool Type::hasSizedVLAType() const {
+  if (!isVariablyModifiedType()) return false;
+
+  if (const PointerType *ptr = getAs<PointerType>())
+    return ptr->getPointeeType()->hasSizedVLAType();
+  if (const ReferenceType *ref = getAs<ReferenceType>())
+    return ref->getPointeeType()->hasSizedVLAType();
+  if (const ArrayType *arr = getAsArrayTypeUnsafe()) {
+    if (isa<VariableArrayType>(arr) && 
+        cast<VariableArrayType>(arr)->getSizeExpr())
+      return true;
+
+    return arr->getElementType()->hasSizedVLAType();
+  }
+
+  return false;
 }

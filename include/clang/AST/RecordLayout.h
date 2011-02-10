@@ -33,8 +33,8 @@ namespace clang {
 /// ObjCInterfaceDecl. FIXME - Find appropriate name.
 /// These objects are managed by ASTContext.
 class ASTRecordLayout {
-  /// Size - Size of record in bits.
-  uint64_t Size;
+  /// Size - Size of record in characters.
+  CharUnits Size;
 
   /// DataSize - Size of record in bits without tail padding.
   uint64_t DataSize;
@@ -50,13 +50,13 @@ class ASTRecordLayout {
 
   /// CXXRecordLayoutInfo - Contains C++ specific layout information.
   struct CXXRecordLayoutInfo {
-    /// NonVirtualSize - The non-virtual size (in bits) of an object, which is
+    /// NonVirtualSize - The non-virtual size (in chars) of an object, which is
     /// the size of the object without virtual bases.
-    uint64_t NonVirtualSize;
+    CharUnits NonVirtualSize;
 
-    /// NonVirtualAlign - The non-virtual alignment (in bits) of an object,
+    /// NonVirtualAlign - The non-virtual alignment (in chars) of an object,
     /// which is the alignment of the object without virtual bases.
-    uint64_t NonVirtualAlign;
+    CharUnits NonVirtualAlign;
 
     /// SizeOfLargestEmptySubobject - The size of the largest empty subobject
     /// (either a base or a member). Will be zero if the class doesn't contain
@@ -82,16 +82,16 @@ class ASTRecordLayout {
 
   friend class ASTContext;
 
-  ASTRecordLayout(ASTContext &Ctx, uint64_t size, unsigned alignment,
+  ASTRecordLayout(const ASTContext &Ctx, CharUnits size, unsigned alignment,
                   unsigned datasize, const uint64_t *fieldoffsets,
                   unsigned fieldcount);
 
   // Constructor for C++ records.
   typedef CXXRecordLayoutInfo::BaseOffsetsMapTy BaseOffsetsMapTy;
-  ASTRecordLayout(ASTContext &Ctx,
-                  uint64_t size, unsigned alignment, uint64_t datasize,
+  ASTRecordLayout(const ASTContext &Ctx,
+                  CharUnits size, unsigned alignment, uint64_t datasize,
                   const uint64_t *fieldoffsets, unsigned fieldcount,
-                  uint64_t nonvirtualsize, unsigned nonvirtualalign,
+                  CharUnits nonvirtualsize, CharUnits nonvirtualalign,
                   CharUnits SizeOfLargestEmptySubobject,
                   const CXXRecordDecl *PrimaryBase,
                   bool IsPrimaryBaseVirtual,
@@ -109,8 +109,8 @@ public:
   /// getAlignment - Get the record alignment in bits.
   unsigned getAlignment() const { return Alignment; }
 
-  /// getSize - Get the record size in bits.
-  uint64_t getSize() const { return Size; }
+  /// getSize - Get the record size in characters.
+  CharUnits getSize() const { return Size; }
 
   /// getFieldCount - Get the number of fields in the layout.
   unsigned getFieldCount() const { return FieldCount; }
@@ -128,17 +128,17 @@ public:
     return DataSize;
   }
 
-  /// getNonVirtualSize - Get the non-virtual size (in bits) of an object,
+  /// getNonVirtualSize - Get the non-virtual size (in chars) of an object,
   /// which is the size of the object without virtual bases.
-  uint64_t getNonVirtualSize() const {
+  CharUnits getNonVirtualSize() const {
     assert(CXXInfo && "Record layout does not have C++ specific info!");
 
     return CXXInfo->NonVirtualSize;
   }
 
-  /// getNonVirtualSize - Get the non-virtual alignment (in bits) of an object,
+  /// getNonVirtualSize - Get the non-virtual alignment (in chars) of an object,
   /// which is the alignment of the object without virtual bases.
-  unsigned getNonVirtualAlign() const {
+  CharUnits getNonVirtualAlign() const {
     assert(CXXInfo && "Record layout does not have C++ specific info!");
 
     return CXXInfo->NonVirtualAlign;

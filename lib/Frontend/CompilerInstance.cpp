@@ -28,6 +28,7 @@
 #include "clang/Serialization/ASTReader.h"
 #include "clang/Sema/CodeCompleteConsumer.h"
 #include "llvm/LLVMContext.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/Statistic.h"
@@ -36,6 +37,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/Signals.h"
+#include "llvm/Support/system_error.h"
 using namespace clang;
 
 CompilerInstance::CompilerInstance()
@@ -205,6 +207,16 @@ CompilerInstance::createPreprocessor(Diagnostic &Diags,
   if (!DepOpts.OutputFile.empty())
     AttachDependencyFileGen(*PP, DepOpts);
 
+  // Handle generating header include information, if requested.
+  if (DepOpts.ShowHeaderIncludes)
+    AttachHeaderIncludeGen(*PP);
+  if (!DepOpts.HeaderIncludeOutputFile.empty()) {
+    llvm::StringRef OutputPath = DepOpts.HeaderIncludeOutputFile;
+    if (OutputPath == "-")
+      OutputPath = "";
+    AttachHeaderIncludeGen(*PP, /*ShowAllHeaders=*/true, OutputPath);
+  }
+
   return PP;
 }
 
@@ -222,11 +234,13 @@ void CompilerInstance::createASTContext() {
 
 void CompilerInstance::createPCHExternalASTSource(llvm::StringRef Path,
                                                   bool DisablePCHValidation,
+                                                  bool DisableStatCache,
                                                  void *DeserializationListener){
   llvm::OwningPtr<ExternalASTSource> Source;
   bool Preamble = getPreprocessorOpts().PrecompiledPreambleBytes.first != 0;
   Source.reset(createPCHExternalASTSource(Path, getHeaderSearchOpts().Sysroot,
-                                          DisablePCHValidation,
+                                          DisablePCHValidation, 
+                                          DisableStatCache,
                                           getPreprocessor(), getASTContext(),
                                           DeserializationListener,
                                           Preamble));
@@ -237,6 +251,7 @@ ExternalASTSource *
 CompilerInstance::createPCHExternalASTSource(llvm::StringRef Path,
                                              const std::string &Sysroot,
                                              bool DisablePCHValidation,
+                                             bool DisableStatCache,
                                              Preprocessor &PP,
                                              ASTContext &Context,
                                              void *DeserializationListener,
@@ -244,7 +259,7 @@ CompilerInstance::createPCHExternalASTSource(llvm::StringRef Path,
   llvm::OwningPtr<ASTReader> Reader;
   Reader.reset(new ASTReader(PP, &Context,
                              Sysroot.empty() ? 0 : Sysroot.c_str(),
-                             DisablePCHValidation));
+                             DisablePCHValidation, DisableStatCache));
 
   Reader->setDeserializationListener(
             static_cast<ASTDeserializationListener *>(DeserializationListener));
@@ -379,16 +394,17 @@ CompilerInstance::createDefaultOutputFile(bool Binary,
                                           llvm::StringRef InFile,
                                           llvm::StringRef Extension) {
   return createOutputFile(getFrontendOpts().OutputFile, Binary,
-                          InFile, Extension);
+                          /*RemoveFileOnSignal=*/true, InFile, Extension);
 }
 
 llvm::raw_fd_ostream *
 CompilerInstance::createOutputFile(llvm::StringRef OutputPath,
-                                   bool Binary,
+                                   bool Binary, bool RemoveFileOnSignal,
                                    llvm::StringRef InFile,
                                    llvm::StringRef Extension) {
   std::string Error, OutputPathName, TempPathName;
   llvm::raw_fd_ostream *OS = createOutputFile(OutputPath, Error, Binary,
+                                              RemoveFileOnSignal,
                                               InFile, Extension,
                                               &OutputPathName,
                                               &TempPathName);
@@ -410,6 +426,7 @@ llvm::raw_fd_ostream *
 CompilerInstance::createOutputFile(llvm::StringRef OutputPath,
                                    std::string &Error,
                                    bool Binary,
+                                   bool RemoveFileOnSignal,
                                    llvm::StringRef InFile,
                                    llvm::StringRef Extension,
                                    std::string *ResultPathName,
@@ -432,7 +449,8 @@ CompilerInstance::createOutputFile(llvm::StringRef OutputPath,
     llvm::sys::Path OutPath(OutFile);
     // Only create the temporary if we can actually write to OutPath, otherwise
     // we want to fail early.
-    if (!OutPath.exists() ||
+    bool Exists;
+    if ((llvm::sys::fs::exists(OutPath.str(), Exists) || !Exists) ||
         (OutPath.isRegularFile() && OutPath.canWrite())) {
       // Create a temporary file.
       llvm::sys::Path TempPath(OutFile);
@@ -452,7 +470,8 @@ CompilerInstance::createOutputFile(llvm::StringRef OutputPath,
     return 0;
 
   // Make sure the out stream file gets removed if we crash.
-  llvm::sys::RemoveFileOnSignal(llvm::sys::Path(OSFile));
+  if (RemoveFileOnSignal)
+    llvm::sys::RemoveFileOnSignal(llvm::sys::Path(OSFile));
 
   if (ResultPathName)
     *ResultPathName = OutFile;
@@ -486,15 +505,16 @@ bool CompilerInstance::InitializeSourceManager(llvm::StringRef InputFile,
     }
     SourceMgr.createMainFileID(File);
   } else {
-    llvm::MemoryBuffer *SB = llvm::MemoryBuffer::getSTDIN();
-    if (!SB) {
+    llvm::OwningPtr<llvm::MemoryBuffer> SB;
+    if (llvm::MemoryBuffer::getSTDIN(SB)) {
+      // FIXME: Give ec.message() in this diag.
       Diags.Report(diag::err_fe_error_reading_stdin);
       return false;
     }
     const FileEntry *File = FileMgr.getVirtualFile(SB->getBufferIdentifier(),
                                                    SB->getBufferSize(), 0);
     SourceMgr.createMainFileID(File);
-    SourceMgr.overrideFileContents(File, SB);
+    SourceMgr.overrideFileContents(File, SB.take());
   }
 
   assert(!SourceMgr.getMainFileID().isInvalid() &&

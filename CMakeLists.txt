@@ -1,4 +1,64 @@
-# Clang version information
+# If we are not building as a part of LLVM, build Clang as an
+# standalone project, using LLVM as an external library:
+if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
+  project(Clang)
+  cmake_minimum_required(VERSION 2.8)
+
+  set(CLANG_PATH_TO_LLVM_SOURCE "" CACHE PATH
+    "Path to LLVM source code. Not necessary if using an installed LLVM.")
+  set(CLANG_PATH_TO_LLVM_BUILD "" CACHE PATH
+    "Path to the directory where LLVM was built or installed.")
+
+  if( CLANG_PATH_TO_LLVM_SOURCE )
+    if( NOT EXISTS "${CLANG_PATH_TO_LLVM_SOURCE}/cmake/config-ix.cmake" )
+      message(FATAL_ERROR "Please set CLANG_PATH_TO_LLVM_SOURCE to the root directory of LLVM source code.")
+    else()
+      get_filename_component(LLVM_MAIN_SRC_DIR ${CLANG_PATH_TO_LLVM_SOURCE}
+	ABSOLUTE)
+      list(APPEND CMAKE_MODULE_PATH "${LLVM_MAIN_SRC_DIR}/cmake/modules")
+    endif()
+  endif()
+
+  if( NOT EXISTS "${CLANG_PATH_TO_LLVM_BUILD}/bin/tblgen${CMAKE_EXECUTABLE_SUFFIX}" )
+    message(FATAL_ERROR "Please set CLANG_PATH_TO_LLVM_BUILD to a directory containing a LLVM build.")
+  endif()
+
+  list(APPEND CMAKE_MODULE_PATH "${CLANG_PATH_TO_LLVM_BUILD}/share/llvm/cmake")
+
+  get_filename_component(PATH_TO_LLVM_BUILD ${CLANG_PATH_TO_LLVM_BUILD}
+    ABSOLUTE)
+
+  include(AddLLVM)
+  include(TableGen)
+  include("${CLANG_PATH_TO_LLVM_BUILD}/share/llvm/cmake/LLVM.cmake")
+  include(HandleLLVMOptions)
+
+  set(PACKAGE_VERSION "${LLVM_PACKAGE_VERSION}")
+
+  set(LLVM_MAIN_INCLUDE_DIR "${LLVM_MAIN_SRC_DIR}/include")
+  set(LLVM_BINARY_DIR ${CMAKE_BINARY_DIR})
+
+  include_directories("${PATH_TO_LLVM_BUILD}/include" "${LLVM_MAIN_INCLUDE_DIR}")
+  if( NOT PATH_TO_LLVM_BUILD STREQUAL LLVM_MAIN_SRC_DIR )
+    include_directories("${LLVM_MAIN_INCLUDE_DIR}")
+  endif()
+  link_directories("${PATH_TO_LLVM_BUILD}/lib")
+
+  set(LLVM_TABLEGEN_EXE "${PATH_TO_LLVM_BUILD}/bin/tblgen")
+
+  set( CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin )
+  set( CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib )
+  set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib )
+
+  add_definitions( -D__STDC_LIMIT_MACROS )
+  add_definitions( -D__STDC_CONSTANT_MACROS )
+endif()
+
+set(CLANG_RESOURCE_DIR "" CACHE STRING
+  "Relative directory from the Clang binary to its resource files.")
+
+set(C_INCLUDE_DIRS "" CACHE STRING
+  "Colon separated list of directories clang will search for headers.")
 
 set(CLANG_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(CLANG_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
@@ -47,8 +107,6 @@ configure_file(
 
 # Add appropriate flags for GCC
 if (CMAKE_COMPILER_IS_GNUCXX)
-  # FIXME: Turn off exceptions, RTTI:
-  # -fno-exceptions -fno-rtti
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-common -Woverloaded-virtual -Wcast-qual -fno-strict-aliasing -pedantic -Wno-long-long -Wall -W -Wno-unused-parameter -Wwrite-strings")
 endif ()
 
@@ -56,14 +114,19 @@ if (APPLE)
   set(CMAKE_MODULE_LINKER_FLAGS "-Wl,-flat_namespace -Wl,-undefined -Wl,suppress")
 endif ()
 
+configure_file(
+  ${CLANG_SOURCE_DIR}/include/clang/Config/config.h.cmake
+  ${CLANG_BINARY_DIR}/include/clang/Config/config.h)
+
 macro(add_clang_library name)
-  set(srcs ${ARGN})
+  llvm_process_sources(srcs ${ARGN})
   if(MSVC_IDE OR XCODE)
-    file( GLOB_RECURSE headers *.h *.td *.def)
-    set(srcs ${srcs} ${headers})
     string( REGEX MATCHALL "/[^/]+" split_path ${CMAKE_CURRENT_SOURCE_DIR})
     list( GET split_path -1 dir)
     file( GLOB_RECURSE headers
+      ../../../include/clang/StaticAnalyzer${dir}/*.h
+      ../../../include/clang/StaticAnalyzer${dir}/*.td
+      ../../../include/clang/StaticAnalyzer${dir}/*.def
       ../../include/clang${dir}/*.h
       ../../include/clang${dir}/*.td
       ../../include/clang${dir}/*.def)
@@ -112,12 +175,7 @@ macro(add_clang_library name)
 endmacro(add_clang_library)
 
 macro(add_clang_executable name)
-  set(srcs ${ARGN})
-  if(MSVC_IDE)
-    file( GLOB_RECURSE headers *.h *.td *.def)
-    set(srcs ${srcs} ${headers})
-  endif(MSVC_IDE)
-  add_llvm_executable( ${name} ${srcs} )
+  add_llvm_executable( ${name} ${ARGN} )
 endmacro(add_clang_executable)
 
 include_directories(
@@ -141,7 +199,7 @@ install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/include/
   PATTERN "*.inc"
   )
 
-add_definitions( -D_GNU_SOURCE )
+add_definitions( -D_GNU_SOURCE -DHAVE_CLANG_CONFIG_H )
 
 option(CLANG_BUILD_EXAMPLES "Build CLANG example programs." OFF)
 if(CLANG_BUILD_EXAMPLES)
@@ -151,7 +209,7 @@ endif ()
 add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(tools)
+add_subdirectory(runtime)
 
 # TODO: docs.
 add_subdirectory(test)
-

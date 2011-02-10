@@ -95,6 +95,7 @@ def err_expected_lsquare : Error<"expected '['">;
 def err_expected_rsquare : Error<"expected ']'">;
 def err_expected_rbrace : Error<"expected '}'">;
 def err_expected_greater : Error<"expected '>'">;
+def err_expected_ggg : Error<"expected '>>>'">;
 def err_expected_semi_declaration : Error<
   "expected ';' at end of declaration">;
 def err_expected_semi_decl_list : Error<
@@ -158,10 +159,12 @@ def err_invalid_reference_qualifier_application : Error<
   "'%0' qualifier may not be applied to a reference">;
 def err_illegal_decl_reference_to_reference : Error<
   "%0 declared as a reference to a reference">;
-def err_rvalue_reference : Error<
-  "rvalue references are only allowed in C++0x">;
-def ext_inline_namespace : Extension<
-  "inline namespaces are a C++0x feature">;
+def ext_rvalue_reference : ExtWarn<
+  "rvalue references are a C++0x extension">, InGroup<CXX0x>;
+def ext_ref_qualifier : ExtWarn<
+  "reference qualifiers on functions are a C++0x extension">, InGroup<CXX0x>;
+def ext_inline_namespace : ExtWarn<
+  "inline namespaces are a C++0x feature">, InGroup<CXX0x>;
 def err_argument_required_after_attribute : Error<
   "argument required after attribute">;
 def err_missing_param : Error<"expected parameter declarator">;
@@ -236,7 +239,7 @@ def err_objc_property_requires_field_name : Error<
   "property requires fields to be named">;
 def err_objc_property_bitfield : Error<"property name cannot be a bitfield">;
 def err_objc_expected_property_attr : Error<"unknown property attribute %0">;
-def err_objc_propertoes_require_objc2 : Error<
+def err_objc_properties_require_objc2 : Error<
   "properties are an Objective-C 2 feature">;
 def err_objc_unexpected_attr : Error<
   "prefix attribute must be followed by an interface or protocol">;
@@ -374,9 +377,6 @@ def err_expected_type_name_after_typename : Error<
 def err_explicit_spec_non_template : Error<
   "explicit %select{specialization|instantiation}0 of non-template "
   "%select{class|struct|union}1 %2">;
-
-def err_variadic_templates : Error<
-  "variadic templates are only allowed in C++0x">;
   
 def err_default_template_template_parameter_not_template : Error<
   "default template argument for a template template parameter must be a class "
@@ -392,8 +392,26 @@ def err_friend_decl_defines_class : Error<
 def warn_deleted_function_accepted_as_extension: ExtWarn<
   "deleted function definition accepted as a C++0x extension">, InGroup<CXX0x>;
 
+// C++0x override control
+def ext_override_control_keyword : Extension<
+  "'%0' keyword accepted as a C++0x extension">, InGroup<CXX0x>;
+def ext_override_inline: Extension<
+  "'%0' keyword only allowed in declarations, allowed as an extension">;
+
+def err_duplicate_virt_specifier : Error<
+  "class member already marked '%0'">;
+def err_duplicate_class_virt_specifier : Error<
+  "class already marked '%0'">;
+
 def err_scoped_enum_missing_identifier : Error<
   "scoped enumeration requires a name">;
+
+def err_expected_parameter_pack : Error<
+  "expected the name of a parameter pack">;
+def err_paren_sizeof_parameter_pack : Error<
+  "missing parentheses around the size of parameter pack %0">;
+def err_sizeof_parameter_pack : Error<
+  "expected parenthesized parameter pack name in 'sizeof...' expression">;
 
 // Language specific pragmas
 // - Generic warnings

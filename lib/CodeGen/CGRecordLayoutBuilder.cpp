@@ -125,7 +125,7 @@ private:
                              const ASTRecordLayout &Layout);
 
   /// ComputeNonVirtualBaseType - Compute the non-virtual base field types.
-  void ComputeNonVirtualBaseType(const CXXRecordDecl *RD);
+  bool ComputeNonVirtualBaseType(const CXXRecordDecl *RD);
   
   /// LayoutField - layout a single field. Returns false if the operation failed
   /// because the current struct is not packed.
@@ -300,7 +300,8 @@ CGBitFieldInfo CGBitFieldInfo::MakeInfo(CodeGenTypes &Types,
                                         uint64_t FieldSize) {
   const RecordDecl *RD = FD->getParent();
   const ASTRecordLayout &RL = Types.getContext().getASTRecordLayout(RD);
-  uint64_t ContainingTypeSizeInBits = RL.getSize();
+  uint64_t ContainingTypeSizeInBits = 
+    RL.getSize().getQuantity() * Types.getContext().getCharWidth();
   unsigned ContainingTypeAlign = RL.getAlignment();
 
   return MakeInfo(Types, FD, FieldOffset, FieldSize, ContainingTypeSizeInBits,
@@ -489,8 +490,9 @@ void CGRecordLayoutBuilder::LayoutUnion(const RecordDecl *D) {
   }
 
   // Append tail padding.
-  if (Layout.getSize() / 8 > Size)
-    AppendPadding(Layout.getSize() / 8, Align);
+  uint64_t RecordSize = Layout.getSize().getQuantity();
+  if (RecordSize > Size)
+    AppendPadding(RecordSize, Align);
 }
 
 void CGRecordLayoutBuilder::LayoutBase(const CXXRecordDecl *BaseDecl,
@@ -500,12 +502,12 @@ void CGRecordLayoutBuilder::LayoutBase(const CXXRecordDecl *BaseDecl,
   const ASTRecordLayout &Layout = 
     Types.getContext().getASTRecordLayout(BaseDecl);
   
-  uint64_t NonVirtualSize = Layout.getNonVirtualSize();
+  CharUnits NonVirtualSize = Layout.getNonVirtualSize();
   
   AppendPadding(BaseOffset / 8, 1);
   
   // FIXME: Actually use a better type than [sizeof(BaseDecl) x i8] when we can.
-  AppendBytes(NonVirtualSize / 8);
+  AppendBytes(NonVirtualSize.getQuantity());
 }
 
 void
@@ -520,12 +522,12 @@ CGRecordLayoutBuilder::LayoutVirtualBase(const CXXRecordDecl *BaseDecl,
   const ASTRecordLayout &Layout = 
     Types.getContext().getASTRecordLayout(BaseDecl);
 
-  uint64_t NonVirtualSize = Layout.getNonVirtualSize();
+  CharUnits NonVirtualSize = Layout.getNonVirtualSize();
 
   AppendPadding(BaseOffset / 8, 1);
   
   // FIXME: Actually use a better type than [sizeof(BaseDecl) x i8] when we can.
-  AppendBytes(NonVirtualSize / 8);
+  AppendBytes(NonVirtualSize.getQuantity());
 
   // FIXME: Add the vbase field info.
 }
@@ -612,38 +614,42 @@ CGRecordLayoutBuilder::LayoutNonVirtualBases(const CXXRecordDecl *RD,
   }
 }
 
-void 
+bool
 CGRecordLayoutBuilder::ComputeNonVirtualBaseType(const CXXRecordDecl *RD) {
   const ASTRecordLayout &Layout = Types.getContext().getASTRecordLayout(RD);
 
+
+  CharUnits NonVirtualSize  = Layout.getNonVirtualSize();
+  CharUnits NonVirtualAlign = Layout.getNonVirtualAlign();
   uint64_t AlignedNonVirtualTypeSize =
-    llvm::RoundUpToAlignment(Layout.getNonVirtualSize(),
-                             Layout.getNonVirtualAlign()) / 8;
+    NonVirtualSize.RoundUpToAlignment(NonVirtualAlign).getQuantity();
   
   
   // First check if we can use the same fields as for the complete class.
-  if (AlignedNonVirtualTypeSize == Layout.getSize() / 8) {
+  uint64_t RecordSize = Layout.getSize().getQuantity();
+  if (AlignedNonVirtualTypeSize == RecordSize) {
     NonVirtualBaseTypeIsSameAsCompleteType = true;
-    return;
+    return true;
   }
-
-  NonVirtualBaseFieldTypes = FieldTypes;
 
   // Check if we need padding.
   uint64_t AlignedNextFieldOffset =
     llvm::RoundUpToAlignment(NextFieldOffsetInBytes, 
                              getAlignmentAsLLVMStruct());
 
-  assert(AlignedNextFieldOffset <= AlignedNonVirtualTypeSize && 
-         "Size mismatch!");
+  if (AlignedNextFieldOffset > AlignedNonVirtualTypeSize)
+    return false; // Needs packing.
+
+  NonVirtualBaseFieldTypes = FieldTypes;
 
   if (AlignedNonVirtualTypeSize == AlignedNextFieldOffset) {
     // We don't need any padding.
-    return;
+    return true;
   }
 
   uint64_t NumBytes = AlignedNonVirtualTypeSize - AlignedNextFieldOffset;
   NonVirtualBaseFieldTypes.push_back(getByteArrayType(NumBytes));
+  return true;
 }
 
 bool CGRecordLayoutBuilder::LayoutFields(const RecordDecl *D) {
@@ -670,7 +676,10 @@ bool CGRecordLayoutBuilder::LayoutFields(const RecordDecl *D) {
   if (RD) {
     // We've laid out the non-virtual bases and the fields, now compute the
     // non-virtual base field types.
-    ComputeNonVirtualBaseType(RD);
+    if (!ComputeNonVirtualBaseType(RD)) {
+      assert(!Packed && "Could not layout even with a packed LLVM struct!");
+      return false;
+    }
 
     // And lay out the virtual bases.
     RD->getIndirectPrimaryBases(IndirectPrimaryBases);
@@ -680,7 +689,8 @@ bool CGRecordLayoutBuilder::LayoutFields(const RecordDecl *D) {
   }
   
   // Append tail padding if necessary.
-  AppendTailPadding(Layout.getSize());
+  AppendTailPadding(
+    Layout.getSize().getQuantity() * Types.getContext().getCharWidth());
 
   return true;
 }
@@ -845,14 +855,19 @@ CGRecordLayout *CodeGenTypes::ComputeRecordLayout(const RecordDecl *D) {
   // Verify that the computed LLVM struct size matches the AST layout size.
   const ASTRecordLayout &Layout = getContext().getASTRecordLayout(D);
 
-  uint64_t TypeSizeInBits = Layout.getSize();
+  uint64_t TypeSizeInBits = 
+    Layout.getSize().getQuantity() * getContext().getCharWidth();
   assert(TypeSizeInBits == getTargetData().getTypeAllocSizeInBits(Ty) &&
          "Type size mismatch!");
 
   if (BaseTy) {
-    uint64_t AlignedNonVirtualTypeSizeInBits =
-      llvm::RoundUpToAlignment(Layout.getNonVirtualSize(),
-                               Layout.getNonVirtualAlign());
+    CharUnits NonVirtualSize  = Layout.getNonVirtualSize();
+    CharUnits NonVirtualAlign = Layout.getNonVirtualAlign();
+    CharUnits AlignedNonVirtualTypeSize = 
+      NonVirtualSize.RoundUpToAlignment(NonVirtualAlign);
+
+    uint64_t AlignedNonVirtualTypeSizeInBits = 
+      AlignedNonVirtualTypeSize.getQuantity() * getContext().getCharWidth();
 
     assert(AlignedNonVirtualTypeSizeInBits == 
            getTargetData().getTypeAllocSizeInBits(BaseTy) &&

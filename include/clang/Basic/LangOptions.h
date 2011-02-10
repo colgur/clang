@@ -44,6 +44,8 @@ public:
   unsigned ObjC2             : 1;  // Objective-C 2 support enabled.
   unsigned ObjCNonFragileABI : 1;  // Objective-C modern abi enabled
   unsigned ObjCNonFragileABI2 : 1;  // Objective-C enhanced modern abi enabled
+  unsigned ObjCDefaultSynthProperties : 1; // Objective-C auto-synthesized properties.
+  unsigned AppleKext         : 1;  // Allow apple kext features.
 
   unsigned PascalStrings     : 1;  // Allow Pascal strings
   unsigned WritableStrings   : 1;  // Allow writable strings
@@ -54,6 +56,7 @@ public:
   unsigned SjLjExceptions    : 1;  // Use setjmp-longjump exception handling.
   unsigned RTTI              : 1;  // Support RTTI information.
 
+  unsigned MSBitfields       : 1; // MS-compatible structure layout
   unsigned NeXTRuntime       : 1; // Use NeXT runtime.
   unsigned Freestanding      : 1; // Freestanding implementation
   unsigned NoBuiltin         : 1; // Do not use builtin functions (-fno-builtin)
@@ -155,10 +158,13 @@ public:
     GNUMode = GNUKeywords = ImplicitInt = Digraphs = 0;
     HexFloats = 0;
     GC = ObjC1 = ObjC2 = ObjCNonFragileABI = ObjCNonFragileABI2 = 0;
+    AppleKext = 0;
+    ObjCDefaultSynthProperties = 0;
     NoConstantCFStrings = 0; InlineVisibilityHidden = 0;
     C99 = Microsoft = Borland = CPlusPlus = CPlusPlus0x = 0;
     CXXOperatorNames = PascalStrings = WritableStrings = ConstStrings = 0;
     Exceptions = SjLjExceptions = Freestanding = NoBuiltin = 0;
+    MSBitfields = 0;
     NeXTRuntime = 1;
     RTTI = 1;
     LaxVectorConversions = 1;
@@ -184,7 +190,8 @@ public:
     InstantiationDepth = 1024;
 
     NumLargeByValueCopy = 0;
-
+    MSCVersion = 0;
+    
     Optimize = 0;
     OptimizeSize = 0;
 

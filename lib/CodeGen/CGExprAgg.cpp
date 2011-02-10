@@ -125,7 +125,7 @@ public:
   }
   void VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *E);
   void VisitCXXConstructExpr(const CXXConstructExpr *E);
-  void VisitCXXExprWithTemporaries(CXXExprWithTemporaries *E);
+  void VisitExprWithCleanups(ExprWithCleanups *E);
   void VisitCXXScalarValueInitExpr(CXXScalarValueInitExpr *E);
   void VisitCXXTypeidExpr(CXXTypeidExpr *E) { EmitAggLoadOfLValue(E); }
 
@@ -367,6 +367,7 @@ void AggExprEmitter::VisitBinComma(const BinaryOperator *E) {
 }
 
 void AggExprEmitter::VisitStmtExpr(const StmtExpr *E) {
+  CodeGenFunction::StmtExprEvaluation eval(CGF);
   CGF.EmitCompoundStmt(*E->getSubStmt(), true, Dest);
 }
 
@@ -389,6 +390,8 @@ void AggExprEmitter::VisitBinAssign(const BinaryOperator *E) {
   assert(CGF.getContext().hasSameUnqualifiedType(E->getLHS()->getType(),
                                                  E->getRHS()->getType())
          && "Invalid assignment");
+
+  // FIXME:  __block variables need the RHS evaluated first!
   LValue LHS = CGF.EmitLValue(E->getLHS());
 
   // We have to special case property setters, otherwise we must have
@@ -420,20 +423,19 @@ void AggExprEmitter::VisitConditionalOperator(const ConditionalOperator *E) {
   llvm::BasicBlock *RHSBlock = CGF.createBasicBlock("cond.false");
   llvm::BasicBlock *ContBlock = CGF.createBasicBlock("cond.end");
 
+  CodeGenFunction::ConditionalEvaluation eval(CGF);
   CGF.EmitBranchOnBoolExpr(E->getCond(), LHSBlock, RHSBlock);
-
-  CGF.BeginConditionalBranch();
-  CGF.EmitBlock(LHSBlock);
 
   // Save whether the destination's lifetime is externally managed.
   bool DestLifetimeManaged = Dest.isLifetimeExternallyManaged();
 
+  eval.begin(CGF);
+  CGF.EmitBlock(LHSBlock);
   Visit(E->getLHS());
-  CGF.EndConditionalBranch();
-  CGF.EmitBranch(ContBlock);
+  eval.end(CGF);
 
-  CGF.BeginConditionalBranch();
-  CGF.EmitBlock(RHSBlock);
+  assert(CGF.HaveInsertPoint() && "expression evaluation ended with no IP!");
+  CGF.Builder.CreateBr(ContBlock);
 
   // If the result of an agg expression is unused, then the emission
   // of the LHS might need to create a destination slot.  That's fine
@@ -441,9 +443,10 @@ void AggExprEmitter::VisitConditionalOperator(const ConditionalOperator *E) {
   // we shouldn't claim that its lifetime is externally managed.
   Dest.setLifetimeExternallyManaged(DestLifetimeManaged);
 
+  eval.begin(CGF);
+  CGF.EmitBlock(RHSBlock);
   Visit(E->getRHS());
-  CGF.EndConditionalBranch();
-  CGF.EmitBranch(ContBlock);
+  eval.end(CGF);
 
   CGF.EmitBlock(ContBlock);
 }
@@ -485,8 +488,8 @@ AggExprEmitter::VisitCXXConstructExpr(const CXXConstructExpr *E) {
   CGF.EmitCXXConstructExpr(E, Slot);
 }
 
-void AggExprEmitter::VisitCXXExprWithTemporaries(CXXExprWithTemporaries *E) {
-  CGF.EmitCXXExprWithTemporaries(E, Dest);
+void AggExprEmitter::VisitExprWithCleanups(ExprWithCleanups *E) {
+  CGF.EmitExprWithCleanups(E, Dest);
 }
 
 void AggExprEmitter::VisitCXXScalarValueInitExpr(CXXScalarValueInitExpr *E) {
@@ -804,16 +807,13 @@ static void CheckAggExprForMemSetUse(AggValueSlot &Slot, const Expr *E,
   
   // Okay, it seems like a good idea to use an initial memset, emit the call.
   llvm::Constant *SizeVal = CGF.Builder.getInt64(TypeInfo.first/8);
-  llvm::ConstantInt *AlignVal = CGF.Builder.getInt32(TypeInfo.second/8);
+  unsigned Align = TypeInfo.second/8;
 
   llvm::Value *Loc = Slot.getAddr();
   const llvm::Type *BP = llvm::Type::getInt8PtrTy(CGF.getLLVMContext());
   
   Loc = CGF.Builder.CreateBitCast(Loc, BP);
-  CGF.Builder.CreateCall5(CGF.CGM.getMemSetFn(Loc->getType(),
-                                              SizeVal->getType()),
-                          Loc, CGF.Builder.getInt8(0), SizeVal, AlignVal,
-                          CGF.Builder.getFalse());
+  CGF.Builder.CreateMemSet(Loc, CGF.Builder.getInt8(0), SizeVal, Align, false);
   
   // Tell the AggExprEmitter that the slot is known zero.
   Slot.setZeroed();
@@ -901,12 +901,12 @@ void CodeGenFunction::EmitAggregateCopy(llvm::Value *DestPtr,
 
   const llvm::PointerType *DPT = cast<llvm::PointerType>(DestPtr->getType());
   const llvm::Type *DBP =
-    llvm::Type::getInt8PtrTy(VMContext, DPT->getAddressSpace());
+    llvm::Type::getInt8PtrTy(getLLVMContext(), DPT->getAddressSpace());
   DestPtr = Builder.CreateBitCast(DestPtr, DBP, "tmp");
 
   const llvm::PointerType *SPT = cast<llvm::PointerType>(SrcPtr->getType());
   const llvm::Type *SBP =
-    llvm::Type::getInt8PtrTy(VMContext, SPT->getAddressSpace());
+    llvm::Type::getInt8PtrTy(getLLVMContext(), SPT->getAddressSpace());
   SrcPtr = Builder.CreateBitCast(SrcPtr, SBP, "tmp");
 
   if (const RecordType *RecordTy = Ty->getAs<RecordType>()) {
@@ -933,11 +933,7 @@ void CodeGenFunction::EmitAggregateCopy(llvm::Value *DestPtr,
     }
   }
   
-  Builder.CreateCall5(CGM.getMemCpyFn(DestPtr->getType(), SrcPtr->getType(),
-                                      IntPtrTy),
-                      DestPtr, SrcPtr,
-                      // TypeInfo.first describes size in bits.
-                      llvm::ConstantInt::get(IntPtrTy, TypeInfo.first/8),
-                      Builder.getInt32(TypeInfo.second/8),
-                      Builder.getInt1(isVolatile));
+  Builder.CreateMemCpy(DestPtr, SrcPtr,
+                       llvm::ConstantInt::get(IntPtrTy, TypeInfo.first/8),
+                       TypeInfo.second/8, isVolatile);
 }

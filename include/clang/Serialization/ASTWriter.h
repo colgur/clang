@@ -41,12 +41,14 @@ class ASTContext;
 class ASTSerializationListener;
 class NestedNameSpecifier;
 class CXXBaseSpecifier;
-class CXXBaseOrMemberInitializer;
+class CXXCtorInitializer;
+class HeaderSearch;
 class LabelStmt;
 class MacroDefinition;
 class MemorizeStatCalls;
 class ASTReader;
 class PreprocessedEntity;
+class PreprocessingRecord;
 class Preprocessor;
 class Sema;
 class SourceManager;
@@ -311,7 +313,9 @@ private:
                                const Preprocessor &PP,
                                const char* isysroot);
   void WritePreprocessor(const Preprocessor &PP);
-  void WriteUserDiagnosticMappings(const Diagnostic &Diag);
+  void WriteHeaderSearch(HeaderSearch &HS, const char* isysroot);
+  void WritePreprocessorDetail(PreprocessingRecord &PPRec);
+  void WritePragmaDiagnosticMappings(const Diagnostic &Diag);
   void WriteType(QualType T);
   uint64_t WriteDeclContextLexicalBlock(ASTContext &Context, DeclContext *DC);
   uint64_t WriteDeclContextVisibleBlock(ASTContext &Context, DeclContext *DC);
@@ -482,10 +486,11 @@ public:
   /// \brief Emit a C++ base specifier.
   void AddCXXBaseSpecifier(const CXXBaseSpecifier &Base, RecordDataImpl &Record);
 
-  /// \brief Emit a CXXBaseOrMemberInitializer array.
-  void AddCXXBaseOrMemberInitializers(
-                        const CXXBaseOrMemberInitializer * const *BaseOrMembers,
-                        unsigned NumBaseOrMembers, RecordDataImpl &Record);
+  /// \brief Emit a CXXCtorInitializer array.
+  void AddCXXCtorInitializers(
+                             const CXXCtorInitializer * const *CtorInitializers,
+                             unsigned NumCtorInitializers,
+                             RecordDataImpl &Record);
 
   void AddCXXDefinitionData(const CXXRecordDecl *D, RecordDataImpl &Record);
 

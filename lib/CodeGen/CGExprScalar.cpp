@@ -188,11 +188,6 @@ public:
   Value *VisitGNUNullExpr(const GNUNullExpr *E) {
     return EmitNullValue(E->getType());
   }
-  Value *VisitTypesCompatibleExpr(const TypesCompatibleExpr *E) {
-    return llvm::ConstantInt::get(ConvertType(E->getType()),
-                                  CGF.getContext().typesAreCompatible(
-                                    E->getArgType1(), E->getArgType2()));
-  }
   Value *VisitOffsetOfExpr(OffsetOfExpr *E);
   Value *VisitSizeOfAlignOfExpr(const SizeOfAlignOfExpr *E);
   Value *VisitAddrLabelExpr(const AddrLabelExpr *E) {
@@ -200,6 +195,11 @@ public:
     return Builder.CreateBitCast(V, ConvertType(E->getType()));
   }
 
+  Value *VisitSizeOfPackExpr(SizeOfPackExpr *E) {
+    return llvm::ConstantInt::get(ConvertType(E->getType()), 
+                                  E->getPackLength());
+  }
+    
   // l-values.
   Value *VisitDeclRefExpr(DeclRefExpr *E) {
     Expr::EvalResult Result;
@@ -302,14 +302,19 @@ public:
     return EmitScalarPrePostIncDec(E, LV, true, true);
   }
 
+  llvm::Value *EmitAddConsiderOverflowBehavior(const UnaryOperator *E,
+                                               llvm::Value *InVal,
+                                               llvm::Value *NextVal,
+                                               bool IsInc);
+
   llvm::Value *EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
                                        bool isInc, bool isPre);
 
     
   Value *VisitUnaryAddrOf(const UnaryOperator *E) {
-    // If the sub-expression is an instance member reference,
-    // EmitDeclRefLValue will magically emit it with the appropriate
-    // value as the "address".
+    if (isa<MemberPointerType>(E->getType())) // never sugared
+      return CGF.CGM.getMemberPointerConstant(E);
+
     return EmitLValue(E->getSubExpr()).getAddress();
   }
   Value *VisitUnaryDeref(const UnaryOperator *E) {
@@ -339,8 +344,8 @@ public:
     return CGF.LoadCXXThis();
   }
 
-  Value *VisitCXXExprWithTemporaries(CXXExprWithTemporaries *E) {
-    return CGF.EmitCXXExprWithTemporaries(E).getScalarVal();
+  Value *VisitExprWithCleanups(ExprWithCleanups *E) {
+    return CGF.EmitExprWithCleanups(E).getScalarVal();
   }
   Value *VisitCXXNewExpr(const CXXNewExpr *E) {
     return CGF.EmitCXXNewExpr(E);
@@ -351,6 +356,10 @@ public:
   }
   Value *VisitUnaryTypeTraitExpr(const UnaryTypeTraitExpr *E) {
     return llvm::ConstantInt::get(Builder.getInt1Ty(), E->getValue());
+  }
+
+  Value *VisitBinaryTypeTraitExpr(const BinaryTypeTraitExpr *E) {
+    return llvm::ConstantInt::get(ConvertType(E->getType()), E->getValue());
   }
 
   Value *VisitCXXPseudoDestructorExpr(const CXXPseudoDestructorExpr *E) {
@@ -1106,7 +1115,7 @@ Value *ScalarExprEmitter::EmitCastExpr(CastExpr *CE) {
 
   case CK_GetObjCProperty: {
     assert(CGF.getContext().hasSameUnqualifiedType(E->getType(), DestTy));
-    assert(E->isLValue() && E->getObjectKind() == OK_ObjCProperty &&
+    assert(E->isGLValue() && E->getObjectKind() == OK_ObjCProperty &&
            "CK_GetObjCProperty for non-lvalue or non-ObjCProperty");
     RValue RV = CGF.EmitLoadOfLValue(CGF.EmitLValue(E), E->getType());
     return RV.getScalarVal();
@@ -1200,8 +1209,9 @@ Value *ScalarExprEmitter::EmitCastExpr(CastExpr *CE) {
 }
 
 Value *ScalarExprEmitter::VisitStmtExpr(const StmtExpr *E) {
-  return CGF.EmitCompoundStmt(*E->getSubStmt(),
-                              !E->getType()->isVoidType()).getScalarVal();
+  CodeGenFunction::StmtExprEvaluation eval(CGF);
+  return CGF.EmitCompoundStmt(*E->getSubStmt(), !E->getType()->isVoidType())
+    .getScalarVal();
 }
 
 Value *ScalarExprEmitter::VisitBlockDeclRefExpr(const BlockDeclRefExpr *E) {
@@ -1214,6 +1224,31 @@ Value *ScalarExprEmitter::VisitBlockDeclRefExpr(const BlockDeclRefExpr *E) {
 //===----------------------------------------------------------------------===//
 //                             Unary Operators
 //===----------------------------------------------------------------------===//
+
+llvm::Value *ScalarExprEmitter::
+EmitAddConsiderOverflowBehavior(const UnaryOperator *E,
+                                llvm::Value *InVal,
+                                llvm::Value *NextVal, bool IsInc) {
+  switch (CGF.getContext().getLangOptions().getSignedOverflowBehavior()) {
+  case LangOptions::SOB_Undefined:
+    return Builder.CreateNSWAdd(InVal, NextVal, IsInc ? "inc" : "dec");
+    break;
+  case LangOptions::SOB_Defined:
+    return Builder.CreateAdd(InVal, NextVal, IsInc ? "inc" : "dec");
+    break;
+  case LangOptions::SOB_Trapping:
+    BinOpInfo BinOp;
+    BinOp.LHS = InVal;
+    BinOp.RHS = NextVal;
+    BinOp.Ty = E->getType();
+    BinOp.Opcode = BO_Add;
+    BinOp.E = E;
+    return EmitOverflowCheckedBinOp(BinOp);
+    break;
+  }
+  assert(false && "Unknown SignedOverflowBehaviorTy");
+  return 0;
+}
 
 llvm::Value *ScalarExprEmitter::
 EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
@@ -1239,10 +1274,10 @@ EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
       if (const ObjCObjectType *OIT = PTEE->getAs<ObjCObjectType>()) {
         // Handle interface types, which are not represented with a concrete
         // type.
-        int size = CGF.getContext().getTypeSize(OIT) / 8;
+        CharUnits size = CGF.getContext().getTypeSizeInChars(OIT);
         if (!isInc)
           size = -size;
-        Inc = llvm::ConstantInt::get(Inc->getType(), size);
+        Inc = llvm::ConstantInt::get(Inc->getType(), size.getQuantity());
         const llvm::Type *i8Ty = llvm::Type::getInt8PtrTy(VMContext);
         InVal = Builder.CreateBitCast(InVal, i8Ty);
         NextVal = Builder.CreateGEP(InVal, Inc, "add.ptr");
@@ -1264,31 +1299,26 @@ EmitScalarPrePostIncDec(const UnaryOperator *E, LValue LV,
     // An interesting aspect of this is that increment is always true.
     // Decrement does not have this property.
     NextVal = llvm::ConstantInt::getTrue(VMContext);
+  } else if (ValTy->isVectorType()) {
+    if (ValTy->hasIntegerRepresentation()) {
+      NextVal = llvm::ConstantInt::get(InVal->getType(), AmountVal);
+
+      NextVal = ValTy->hasSignedIntegerRepresentation() ?
+                EmitAddConsiderOverflowBehavior(E, InVal, NextVal, isInc) :
+                Builder.CreateAdd(InVal, NextVal, isInc ? "inc" : "dec");
+    } else {
+      NextVal = Builder.CreateFAdd(
+                  InVal,
+                  llvm::ConstantFP::get(InVal->getType(), AmountVal),
+                  isInc ? "inc" : "dec");
+    }
   } else if (isa<llvm::IntegerType>(InVal->getType())) {
     NextVal = llvm::ConstantInt::get(InVal->getType(), AmountVal);
-    
-    if (!ValTy->isSignedIntegerType())
-      // Unsigned integer inc is always two's complement.
-      NextVal = Builder.CreateAdd(InVal, NextVal, isInc ? "inc" : "dec");
-    else {
-      switch (CGF.getContext().getLangOptions().getSignedOverflowBehavior()) {
-      case LangOptions::SOB_Undefined:
-        NextVal = Builder.CreateNSWAdd(InVal, NextVal, isInc ? "inc" : "dec");
-        break;
-      case LangOptions::SOB_Defined:
-        NextVal = Builder.CreateAdd(InVal, NextVal, isInc ? "inc" : "dec");
-        break;
-      case LangOptions::SOB_Trapping:
-        BinOpInfo BinOp;
-        BinOp.LHS = InVal;
-        BinOp.RHS = NextVal;
-        BinOp.Ty = E->getType();
-        BinOp.Opcode = BO_Add;
-        BinOp.E = E;
-        NextVal = EmitOverflowCheckedBinOp(BinOp);
-        break;
-      }
-    }
+
+    NextVal = ValTy->isSignedIntegerType() ?
+              EmitAddConsiderOverflowBehavior(E, InVal, NextVal, isInc) :
+              // Unsigned integer inc is always two's complement.
+              Builder.CreateAdd(InVal, NextVal, isInc ? "inc" : "dec");
   } else {
     // Add the inc/dec to the real part.
     if (InVal->getType()->isFloatTy())
@@ -2059,8 +2089,7 @@ Value *ScalarExprEmitter::EmitCompare(const BinaryOperator *E,unsigned UICmpOpc,
             *SecondVecArg = RHS;
 
       QualType ElTy = LHSTy->getAs<VectorType>()->getElementType();
-      Type *Ty = CGF.getContext().getCanonicalType(ElTy).getTypePtr();
-      const BuiltinType *BTy = dyn_cast<BuiltinType>(Ty);
+      const BuiltinType *BTy = ElTy->getAs<BuiltinType>();
       BuiltinType::Kind ElementKind = BTy->getKind();
 
       switch(E->getOpcode()) {
@@ -2221,6 +2250,8 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
   llvm::BasicBlock *ContBlock = CGF.createBasicBlock("land.end");
   llvm::BasicBlock *RHSBlock  = CGF.createBasicBlock("land.rhs");
 
+  CodeGenFunction::ConditionalEvaluation eval(CGF);
+
   // Branch on the LHS first.  If it is false, go to the failure (cont) block.
   CGF.EmitBranchOnBoolExpr(E->getLHS(), RHSBlock, ContBlock);
 
@@ -2234,10 +2265,10 @@ Value *ScalarExprEmitter::VisitBinLAnd(const BinaryOperator *E) {
        PI != PE; ++PI)
     PN->addIncoming(llvm::ConstantInt::getFalse(VMContext), *PI);
 
-  CGF.BeginConditionalBranch();
+  eval.begin(CGF);
   CGF.EmitBlock(RHSBlock);
   Value *RHSCond = CGF.EvaluateExprAsBool(E->getRHS());
-  CGF.EndConditionalBranch();
+  eval.end(CGF);
 
   // Reaquire the RHS block, as there may be subblocks inserted.
   RHSBlock = Builder.GetInsertBlock();
@@ -2271,6 +2302,8 @@ Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
   llvm::BasicBlock *ContBlock = CGF.createBasicBlock("lor.end");
   llvm::BasicBlock *RHSBlock = CGF.createBasicBlock("lor.rhs");
 
+  CodeGenFunction::ConditionalEvaluation eval(CGF);
+
   // Branch on the LHS first.  If it is true, go to the success (cont) block.
   CGF.EmitBranchOnBoolExpr(E->getLHS(), ContBlock, RHSBlock);
 
@@ -2284,13 +2317,13 @@ Value *ScalarExprEmitter::VisitBinLOr(const BinaryOperator *E) {
        PI != PE; ++PI)
     PN->addIncoming(llvm::ConstantInt::getTrue(VMContext), *PI);
 
-  CGF.BeginConditionalBranch();
+  eval.begin(CGF);
 
   // Emit the RHS condition as a bool value.
   CGF.EmitBlock(RHSBlock);
   Value *RHSCond = CGF.EvaluateExprAsBool(E->getRHS());
 
-  CGF.EndConditionalBranch();
+  eval.end(CGF);
 
   // Reaquire the RHS block, as there may be subblocks inserted.
   RHSBlock = Builder.GetInsertBlock();
@@ -2420,6 +2453,8 @@ VisitConditionalOperator(const ConditionalOperator *E) {
   llvm::BasicBlock *LHSBlock = CGF.createBasicBlock("cond.true");
   llvm::BasicBlock *RHSBlock = CGF.createBasicBlock("cond.false");
   llvm::BasicBlock *ContBlock = CGF.createBasicBlock("cond.end");
+
+  CodeGenFunction::ConditionalEvaluation eval(CGF);
   
   // If we don't have the GNU missing condition extension, emit a branch on bool
   // the normal way.
@@ -2451,24 +2486,20 @@ VisitConditionalOperator(const ConditionalOperator *E) {
     Builder.CreateCondBr(CondBoolVal, LHSBlock, RHSBlock);
   }
 
-  CGF.BeginConditionalBranch();
   CGF.EmitBlock(LHSBlock);
-
-  // Handle the GNU extension for missing LHS.
+  eval.begin(CGF);
   Value *LHS = Visit(E->getTrueExpr());
+  eval.end(CGF);
 
-  CGF.EndConditionalBranch();
   LHSBlock = Builder.GetInsertBlock();
-  CGF.EmitBranch(ContBlock);
+  Builder.CreateBr(ContBlock);
 
-  CGF.BeginConditionalBranch();
   CGF.EmitBlock(RHSBlock);
-
+  eval.begin(CGF);
   Value *RHS = Visit(E->getRHS());
-  CGF.EndConditionalBranch();
-  RHSBlock = Builder.GetInsertBlock();
-  CGF.EmitBranch(ContBlock);
+  eval.end(CGF);
 
+  RHSBlock = Builder.GetInsertBlock();
   CGF.EmitBlock(ContBlock);
 
   // If the LHS or RHS is a throw expression, it will be legitimately null.
@@ -2501,8 +2532,8 @@ Value *ScalarExprEmitter::VisitVAArgExpr(VAArgExpr *VE) {
   return Builder.CreateLoad(ArgPtr);
 }
 
-Value *ScalarExprEmitter::VisitBlockExpr(const BlockExpr *BE) {
-  return CGF.BuildBlockLiteralTmp(BE);
+Value *ScalarExprEmitter::VisitBlockExpr(const BlockExpr *block) {
+  return CGF.EmitBlockLiteral(block);
 }
 
 //===----------------------------------------------------------------------===//

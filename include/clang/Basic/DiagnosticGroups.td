@@ -35,6 +35,7 @@ def : DiagGroup<"declaration-after-statement">;
 def GNUDesignator : DiagGroup<"gnu-designator">;
 
 def DeprecatedDeclarations : DiagGroup<"deprecated-declarations">;
+def DeprecatedWritableStr : DiagGroup<"deprecated-writable-strings">;
 def Deprecated : DiagGroup<"deprecated", [ DeprecatedDeclarations] >,
                  DiagCategory<"Deprecations">;
 
@@ -79,13 +80,13 @@ def NullDereference : DiagGroup<"null-dereference">;
 def InitializerOverrides : DiagGroup<"initializer-overrides">;
 def NonNull : DiagGroup<"nonnull">;
 def : DiagGroup<"nonportable-cfstrings">;
-def : DiagGroup<"non-virtual-dtor">;
+def NonVirtualDtor : DiagGroup<"non-virtual-dtor">;
 def : DiagGroup<"old-style-cast">;
 def : DiagGroup<"old-style-definition">;
 def OutOfLineDeclaration : DiagGroup<"out-of-line-declaration">;
 def : DiagGroup<"overflow">;
 def OverlengthStrings : DiagGroup<"overlength-strings">;
-def : DiagGroup<"overloaded-virtual">;
+def OverloadedVirtual : DiagGroup<"overloaded-virtual">;
 def Packed : DiagGroup<"packed">;
 def Padded : DiagGroup<"padded">;
 def PointerArith : DiagGroup<"pointer-arith">;
@@ -95,6 +96,7 @@ def : DiagGroup<"pointer-to-int-cast">;
 def : DiagGroup<"redundant-decls">;
 def ReturnType : DiagGroup<"return-type">;
 def BindToTemporaryCopy : DiagGroup<"bind-to-temporary-copy">;
+def SelfAssignment : DiagGroup<"self-assign">;
 def SemiBeforeMethodBody : DiagGroup<"semicolon-before-method-body">;
 def : DiagGroup<"sequence-point">;
 def Shadow : DiagGroup<"shadow">;
@@ -148,6 +150,10 @@ def UsedButMarkedUnused : DiagGroup<"used-but-marked-unused">;
 def ReadOnlySetterAttrs : DiagGroup<"readonly-setter-attrs">;
 def Reorder : DiagGroup<"reorder">;
 def UndeclaredSelector : DiagGroup<"undeclared-selector">;
+def ImplicitAtomic : DiagGroup<"implicit-atomic-properties">;
+def CustomAtomic : DiagGroup<"custom-atomic-properties">;
+def AtomicProperties : DiagGroup<"atomic-properties",
+                                 [ImplicitAtomic, CustomAtomic]>;
 def Selector : DiagGroup<"selector">;
 def NonfragileAbi2 : DiagGroup<"nonfragile-abi2">;
 def Protocol : DiagGroup<"protocol">;
@@ -215,13 +221,15 @@ def Most : DiagGroup<"most", [
     MultiChar,
     Reorder,
     ReturnType,
+    SelfAssignment,
     Switch,
     Trigraphs,
     Uninitialized,
     UnknownPragmas,
     Unused,
     VectorConversions,
-    VolatileRegisterVar
+    VolatileRegisterVar,
+    OverloadedVirtual
  ]>;
 
 // -Wall is -Wmost -Wparentheses

@@ -198,11 +198,9 @@ static unsigned RFT(unsigned t, bool shift = false) {
       assert(!shift && "cannot shift float types!");
       return (2 << (int)quad) - 1;
     case 5: // poly8
-      assert(!shift && "cannot shift polynomial types!");
-      return (8 << (int)quad) - 1;
+      return shift ? 7 : (8 << (int)quad) - 1;
     case 6: // poly16
-      assert(!shift && "cannot shift polynomial types!");
-      return (4 << (int)quad) - 1;
+      return shift ? 15 : (4 << (int)quad) - 1;
     case 7: // float16
       assert(!shift && "cannot shift float types!");
       return (4 << (int)quad) - 1;
@@ -1493,6 +1491,8 @@ CheckPrintfHandler::HandlePrintfSpecifier(const analyze_printf::PrintfSpecifier
   }
 
   // Check each flag does not conflict with any other component.
+  if (!FS.hasValidThousandsGroupingPrefix())
+    HandleFlag(FS, FS.hasThousandsGrouping(), startSpecifier, specifierLen);
   if (!FS.hasValidLeadingZeros())
     HandleFlag(FS, FS.hasLeadingZeros(), startSpecifier, specifierLen);
   if (!FS.hasValidPlusPrefix())
@@ -1935,7 +1935,7 @@ static Expr *EvalAddr(Expr *E, llvm::SmallVectorImpl<DeclRefExpr *> &refVars) {
   }
   
   case Stmt::BlockExprClass:
-    if (cast<BlockExpr>(E)->hasBlockDeclRefExprs())
+    if (cast<BlockExpr>(E)->getBlockDecl()->hasCaptures())
       return E; // local block.
     return NULL;
 
@@ -2243,7 +2243,7 @@ IntRange GetValueRange(ASTContext &C, llvm::APSInt &value, unsigned MaxWidth) {
     return IntRange(value.getMinSignedBits(), false);
 
   if (value.getBitWidth() > MaxWidth)
-    value.trunc(MaxWidth);
+    value = value.trunc(MaxWidth);
 
   // isNonNegative() just checks the sign bit without considering
   // signedness.
@@ -2529,6 +2529,9 @@ static bool HasEnumType(Expr *E) {
 
 void CheckTrivialUnsignedComparison(Sema &S, BinaryOperator *E) {
   BinaryOperatorKind op = E->getOpcode();
+  if (E->isValueDependent())
+    return;
+
   if (op == BO_LT && IsZero(S, E->getRHS())) {
     S.Diag(E->getOperatorLoc(), diag::warn_lunsigned_always_true_comparison)
       << "< 0" << "false" << HasEnumType(E->getLHS())
@@ -2640,6 +2643,13 @@ bool AnalyzeBitFieldAssignment(Sema &S, FieldDecl *Bitfield, Expr *Init,
   if (Bitfield->getType()->isBooleanType())
     return false;
 
+  // Ignore value- or type-dependent expressions.
+  if (Bitfield->getBitWidth()->isValueDependent() ||
+      Bitfield->getBitWidth()->isTypeDependent() ||
+      Init->isValueDependent() ||
+      Init->isTypeDependent())
+    return false;
+
   Expr *OriginalInit = Init->IgnoreParenImpCasts();
 
   llvm::APSInt Width(32);
@@ -2656,16 +2666,15 @@ bool AnalyzeBitFieldAssignment(Sema &S, FieldDecl *Bitfield, Expr *Init,
   if (OriginalWidth <= FieldWidth)
     return false;
 
-  llvm::APSInt TruncatedValue = Value;
-  TruncatedValue.trunc(FieldWidth);
+  llvm::APSInt TruncatedValue = Value.trunc(FieldWidth);
 
   // It's fairly common to write values into signed bitfields
   // that, if sign-extended, would end up becoming a different
   // value.  We don't want to warn about that.
   if (Value.isSigned() && Value.isNegative())
-    TruncatedValue.sext(OriginalWidth);
+    TruncatedValue = TruncatedValue.sext(OriginalWidth);
   else
-    TruncatedValue.zext(OriginalWidth);
+    TruncatedValue = TruncatedValue.zext(OriginalWidth);
 
   if (Value == TruncatedValue)
     return false;
@@ -2712,7 +2721,7 @@ std::string PrettyPrintInRange(const llvm::APSInt &Value, IntRange Range) {
 
   llvm::APSInt ValueInRange = Value;
   ValueInRange.setIsSigned(!Range.NonNegative);
-  ValueInRange.trunc(Range.Width);
+  ValueInRange = ValueInRange.trunc(Range.Width);
   return ValueInRange.toString(10);
 }
 
@@ -2866,11 +2875,12 @@ void CheckConditionalOperator(Sema &S, ConditionalOperator *E, QualType T) {
   if (!Suspicious) return;
 
   // ...but it's currently ignored...
-  if (S.Diags.getDiagnosticLevel(diag::warn_impcast_integer_sign_conditional))
+  if (S.Diags.getDiagnosticLevel(diag::warn_impcast_integer_sign_conditional,
+                                 CC))
     return;
 
   // ...and -Wsign-compare isn't...
-  if (!S.Diags.getDiagnosticLevel(diag::warn_mixed_sign_conditional))
+  if (!S.Diags.getDiagnosticLevel(diag::warn_mixed_sign_conditional, CC))
     return;
 
   // ...then check whether it would have warned about either of the
@@ -3031,7 +3041,8 @@ bool Sema::CheckParmsForFunctionDef(ParmVarDecl **P, ParmVarDecl **PEnd,
 void Sema::CheckCastAlign(Expr *Op, QualType T, SourceRange TRange) {
   // This is actually a lot of work to potentially be doing on every
   // cast; don't do it if we're ignoring -Wcast_align (as is the default).
-  if (getDiagnostics().getDiagnosticLevel(diag::warn_cast_align)
+  if (getDiagnostics().getDiagnosticLevel(diag::warn_cast_align,
+                                          TRange.getBegin())
         == Diagnostic::Ignored)
     return;
 

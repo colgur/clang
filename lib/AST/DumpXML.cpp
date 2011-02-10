@@ -226,7 +226,7 @@ struct XMLDumper : public XMLDeclVisitor<XMLDumper>,
 
   //---- General utilities -------------------------------------------//
 
-  void setPointer(llvm::StringRef prop, void *p) {
+  void setPointer(llvm::StringRef prop, const void *p) {
     llvm::SmallString<10> buffer;
     llvm::raw_svector_ostream os(buffer);
     os << p;
@@ -319,6 +319,10 @@ struct XMLDumper : public XMLDeclVisitor<XMLDumper>,
       break;
     }
     case TemplateArgument::Template:
+    case TemplateArgument::TemplateExpansion:
+      // FIXME: Implement!
+      break;
+        
     case TemplateArgument::Declaration: {
       visitDeclRef(A.getAsDecl());
       break;
@@ -335,7 +339,10 @@ struct XMLDumper : public XMLDeclVisitor<XMLDumper>,
       break;
     }
     case TemplateArgument::Pack: {
-      // TODO
+      for (TemplateArgument::pack_iterator P = A.pack_begin(), 
+                                        PEnd = A.pack_end();
+           P != PEnd; ++P)
+        dispatch(*P);
       break;
     }
     }
@@ -495,7 +502,7 @@ struct XMLDumper : public XMLDeclVisitor<XMLDumper>,
   // CXXDestructorDecl ?
   // CXXConversionDecl ?
 
-  void dispatch(CXXBaseOrMemberInitializer *Init) {
+  void dispatch(CXXCtorInitializer *Init) {
     // TODO
   }
 

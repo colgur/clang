@@ -18,15 +18,14 @@
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/ExprObjC.h"
 #include "clang/AST/CharUnits.h"
+#include "clang/Basic/ABI.h"
 #include "clang/Basic/TargetInfo.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/ValueHandle.h"
 #include "CodeGenModule.h"
-#include "CGBlocks.h"
 #include "CGBuilder.h"
 #include "CGCall.h"
-#include "CGCXX.h"
 #include "CGValue.h"
 
 namespace llvm {
@@ -71,6 +70,8 @@ namespace CodeGen {
   class CGRecordLayout;
   class CGBlockInfo;
   class CGCXXABI;
+  class BlockFlags;
+  class BlockFieldFlags;
 
 /// A branch fixup.  These are required when emitting a goto to a
 /// label which hasn't been emitted yet.  The goto is optimistically
@@ -96,6 +97,28 @@ struct BranchFixup {
   /// The initial branch of the fixup.
   llvm::BranchInst *InitialBranch;
 };
+
+template <class T> struct InvariantValue {
+  typedef T type;
+  typedef T saved_type;
+  static bool needsSaving(type value) { return false; }
+  static saved_type save(CodeGenFunction &CGF, type value) { return value; }
+  static type restore(CodeGenFunction &CGF, saved_type value) { return value; }
+};
+
+/// A metaprogramming class for ensuring that a value will dominate an
+/// arbitrary position in a function.
+template <class T> struct DominatingValue : InvariantValue<T> {};
+
+template <class T, bool mightBeInstruction =
+            llvm::is_base_of<llvm::Value, T>::value &&
+            !llvm::is_base_of<llvm::Constant, T>::value &&
+            !llvm::is_base_of<llvm::BasicBlock, T>::value>
+struct DominatingPointer;
+template <class T> struct DominatingPointer<T,false> : InvariantValue<T*> {};
+// template <class T> struct DominatingPointer<T,true> at end of file
+
+template <class T> struct DominatingValue<T*> : DominatingPointer<T> {};
 
 enum CleanupKind {
   EHCleanup = 0x1,
@@ -173,6 +196,63 @@ public:
     // \param IsForEHCleanup true if this is for an EH cleanup, false
     ///  if for a normal cleanup.
     virtual void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) = 0;
+  };
+
+  /// UnconditionalCleanupN stores its N parameters and just passes
+  /// them to the real cleanup function.
+  template <class T, class A0>
+  class UnconditionalCleanup1 : public Cleanup {
+    A0 a0;
+  public:
+    UnconditionalCleanup1(A0 a0) : a0(a0) {}
+    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
+      T::Emit(CGF, IsForEHCleanup, a0);
+    }
+  };
+
+  template <class T, class A0, class A1>
+  class UnconditionalCleanup2 : public Cleanup {
+    A0 a0; A1 a1;
+  public:
+    UnconditionalCleanup2(A0 a0, A1 a1) : a0(a0), a1(a1) {}
+    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
+      T::Emit(CGF, IsForEHCleanup, a0, a1);
+    }
+  };
+
+  /// ConditionalCleanupN stores the saved form of its N parameters,
+  /// then restores them and performs the cleanup.
+  template <class T, class A0>
+  class ConditionalCleanup1 : public Cleanup {
+    typedef typename DominatingValue<A0>::saved_type A0_saved;
+    A0_saved a0_saved;
+
+    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
+      A0 a0 = DominatingValue<A0>::restore(CGF, a0_saved);
+      T::Emit(CGF, IsForEHCleanup, a0);
+    }
+
+  public:
+    ConditionalCleanup1(A0_saved a0)
+      : a0_saved(a0) {}
+  };
+
+  template <class T, class A0, class A1>
+  class ConditionalCleanup2 : public Cleanup {
+    typedef typename DominatingValue<A0>::saved_type A0_saved;
+    typedef typename DominatingValue<A1>::saved_type A1_saved;
+    A0_saved a0_saved;
+    A1_saved a1_saved;
+
+    void Emit(CodeGenFunction &CGF, bool IsForEHCleanup) {
+      A0 a0 = DominatingValue<A0>::restore(CGF, a0_saved);
+      A1 a1 = DominatingValue<A1>::restore(CGF, a1_saved);
+      T::Emit(CGF, IsForEHCleanup, a0, a1);
+    }
+
+  public:
+    ConditionalCleanup2(A0_saved a0, A1_saved a1)
+      : a0_saved(a0), a1_saved(a1) {}
   };
 
 private:
@@ -423,7 +503,7 @@ public:
 
 /// CodeGenFunction - This class organizes the per-function state that is used
 /// while generating LLVM code.
-class CodeGenFunction : public BlockFunction {
+class CodeGenFunction {
   CodeGenFunction(const CodeGenFunction&); // DO NOT IMPLEMENT
   void operator=(const CodeGenFunction&);  // DO NOT IMPLEMENT
 
@@ -505,8 +585,13 @@ public:
   const llvm::IntegerType *IntPtrTy, *Int32Ty, *Int64Ty;
   uint32_t LLVMPointerWidth;
 
+  const llvm::PointerType *Int8PtrTy;
+
   bool Exceptions;
   bool CatchUndefined;
+
+  const CodeGen::CGBlockInfo *BlockInfo;
+  llvm::Value *BlockPointer;
 
   /// \brief A mapping from NRVO variables to the flags used to indicate
   /// when the NRVO has been applied to this variable.
@@ -536,6 +621,15 @@ public:
 
   llvm::BasicBlock *getInvokeDestImpl();
 
+  /// Set up the last cleaup that was pushed as a conditional
+  /// full-expression cleanup.
+  void initFullExprCleanup();
+
+  template <class T>
+  typename DominatingValue<T>::saved_type saveValueInCond(T value) {
+    return DominatingValue<T>::save(*this, value);
+  }
+
 public:
   /// ObjCEHValueStack - Stack of Objective-C exception values, used for
   /// rethrows.
@@ -551,6 +645,45 @@ public:
                                 llvm::Constant *EndCatchFn,
                                 llvm::Constant *RethrowFn);
   void ExitFinallyBlock(FinallyInfo &FinallyInfo);
+
+  /// pushFullExprCleanup - Push a cleanup to be run at the end of the
+  /// current full-expression.  Safe against the possibility that
+  /// we're currently inside a conditionally-evaluated expression.
+  template <class T, class A0>
+  void pushFullExprCleanup(CleanupKind kind, A0 a0) {
+    // If we're not in a conditional branch, or if none of the
+    // arguments requires saving, then use the unconditional cleanup.
+    if (!isInConditionalBranch()) {
+      typedef EHScopeStack::UnconditionalCleanup1<T, A0> CleanupType;
+      return EHStack.pushCleanup<CleanupType>(kind, a0);
+    }
+
+    typename DominatingValue<A0>::saved_type a0_saved = saveValueInCond(a0);
+
+    typedef EHScopeStack::ConditionalCleanup1<T, A0> CleanupType;
+    EHStack.pushCleanup<CleanupType>(kind, a0_saved);
+    initFullExprCleanup();
+  }
+
+  /// pushFullExprCleanup - Push a cleanup to be run at the end of the
+  /// current full-expression.  Safe against the possibility that
+  /// we're currently inside a conditionally-evaluated expression.
+  template <class T, class A0, class A1>
+  void pushFullExprCleanup(CleanupKind kind, A0 a0, A1 a1) {
+    // If we're not in a conditional branch, or if none of the
+    // arguments requires saving, then use the unconditional cleanup.
+    if (!isInConditionalBranch()) {
+      typedef EHScopeStack::UnconditionalCleanup2<T, A0, A1> CleanupType;
+      return EHStack.pushCleanup<CleanupType>(kind, a0, a1);
+    }
+
+    typename DominatingValue<A0>::saved_type a0_saved = saveValueInCond(a0);
+    typename DominatingValue<A1>::saved_type a1_saved = saveValueInCond(a1);
+
+    typedef EHScopeStack::ConditionalCleanup2<T, A0, A1> CleanupType;
+    EHStack.pushCleanup<CleanupType>(kind, a0_saved, a1_saved);
+    initFullExprCleanup();
+  }
 
   /// PushDestructorCleanup - Push a cleanup to call the
   /// complete-object destructor of an object of the given type at the
@@ -659,35 +792,67 @@ public:
   /// destination.
   UnwindDest getRethrowDest();
 
-  /// BeginConditionalBranch - Should be called before a conditional part of an
-  /// expression is emitted. For example, before the RHS of the expression below
-  /// is emitted:
-  ///
-  /// b && f(T());
-  ///
-  /// This is used to make sure that any temporaries created in the conditional
-  /// branch are only destroyed if the branch is taken.
-  void BeginConditionalBranch() {
-    ++ConditionalBranchLevel;
-  }
+  /// An object to manage conditionally-evaluated expressions.
+  class ConditionalEvaluation {
+    llvm::BasicBlock *StartBB;
 
-  /// EndConditionalBranch - Should be called after a conditional part of an
-  /// expression has been emitted.
-  void EndConditionalBranch() {
-    assert(ConditionalBranchLevel != 0 &&
-           "Conditional branch mismatch!");
+  public:
+    ConditionalEvaluation(CodeGenFunction &CGF)
+      : StartBB(CGF.Builder.GetInsertBlock()) {}
 
-    --ConditionalBranchLevel;
-  }
+    void begin(CodeGenFunction &CGF) {
+      assert(CGF.OutermostConditional != this);
+      if (!CGF.OutermostConditional)
+        CGF.OutermostConditional = this;
+    }
+
+    void end(CodeGenFunction &CGF) {
+      assert(CGF.OutermostConditional != 0);
+      if (CGF.OutermostConditional == this)
+        CGF.OutermostConditional = 0;
+    }
+
+    /// Returns a block which will be executed prior to each
+    /// evaluation of the conditional code.
+    llvm::BasicBlock *getStartingBlock() const {
+      return StartBB;
+    }
+  };
 
   /// isInConditionalBranch - Return true if we're currently emitting
   /// one branch or the other of a conditional expression.
-  bool isInConditionalBranch() const { return ConditionalBranchLevel != 0; }
+  bool isInConditionalBranch() const { return OutermostConditional != 0; }
+
+  /// An RAII object to record that we're evaluating a statement
+  /// expression.
+  class StmtExprEvaluation {
+    CodeGenFunction &CGF;
+
+    /// We have to save the outermost conditional: cleanups in a
+    /// statement expression aren't conditional just because the
+    /// StmtExpr is.
+    ConditionalEvaluation *SavedOutermostConditional;
+
+  public:
+    StmtExprEvaluation(CodeGenFunction &CGF)
+      : CGF(CGF), SavedOutermostConditional(CGF.OutermostConditional) {
+      CGF.OutermostConditional = 0;
+    }
+
+    ~StmtExprEvaluation() {
+      CGF.OutermostConditional = SavedOutermostConditional;
+      CGF.EnsureInsertPoint();
+    }
+  };
   
   /// getByrefValueFieldNumber - Given a declaration, returns the LLVM field
   /// number that holds the value.
   unsigned getByRefValueLLVMField(const ValueDecl *VD) const;
-  
+
+  /// BuildBlockByrefAddress - Computes address location of the
+  /// variable which is declared as __block.
+  llvm::Value *BuildBlockByrefAddress(llvm::Value *BaseAddr,
+                                      const VarDecl *V);
 private:
   CGDebugInfo *DebugInfo;
 
@@ -699,7 +864,8 @@ private:
 
   /// LocalDeclMap - This keeps track of the LLVM allocas or globals for local C
   /// decls.
-  llvm::DenseMap<const Decl*, llvm::Value*> LocalDeclMap;
+  typedef llvm::DenseMap<const Decl*, llvm::Value*> DeclMapTy;
+  DeclMapTy LocalDeclMap;
 
   /// LabelMap - This keeps track of the LLVM basic block for each C label.
   llvm::DenseMap<const LabelStmt*, JumpDest> LabelMap;
@@ -750,10 +916,10 @@ private:
   ImplicitParamDecl *CXXVTTDecl;
   llvm::Value *CXXVTTValue;
 
-  /// ConditionalBranchLevel - Contains the nesting level of the current
-  /// conditional branch. This is used so that we know if a temporary should be
-  /// destroyed conditionally.
-  unsigned ConditionalBranchLevel;
+  /// OutermostConditional - Points to the outermost active
+  /// conditional control.  This is used so that we know if a
+  /// temporary should be destroyed conditionally.
+  ConditionalEvaluation *OutermostConditional;
 
 
   /// ByrefValueInfoMap - For each __block variable, contains a pair of the LLVM
@@ -771,6 +937,8 @@ public:
   CodeGenTypes &getTypes() const { return CGM.getTypes(); }
   ASTContext &getContext() const;
   CGDebugInfo *getDebugInfo() { return DebugInfo; }
+
+  const LangOptions &getLangOptions() const { return CGM.getLangOptions(); }
 
   /// Returns a pointer to the function's exception object slot, which
   /// is assigned in every landing pad.
@@ -792,7 +960,7 @@ public:
     return getInvokeDestImpl();
   }
 
-  llvm::LLVMContext &getLLVMContext() { return VMContext; }
+  llvm::LLVMContext &getLLVMContext() { return CGM.getLLVMContext(); }
 
   //===--------------------------------------------------------------------===//
   //                                  Objective-C
@@ -820,29 +988,41 @@ public:
   //                                  Block Bits
   //===--------------------------------------------------------------------===//
 
-  llvm::Value *BuildBlockLiteralTmp(const BlockExpr *);
+  llvm::Value *EmitBlockLiteral(const BlockExpr *);
   llvm::Constant *BuildDescriptorBlockDecl(const BlockExpr *,
                                            const CGBlockInfo &Info,
                                            const llvm::StructType *,
-                                           llvm::Constant *BlockVarLayout,
-                                           std::vector<HelperInfo> *);
+                                           llvm::Constant *BlockVarLayout);
 
   llvm::Function *GenerateBlockFunction(GlobalDecl GD,
-                                        const BlockExpr *BExpr,
-                                        CGBlockInfo &Info,
+                                        const CGBlockInfo &Info,
                                         const Decl *OuterFuncDecl,
-                                        llvm::Constant *& BlockVarLayout,
-                                  llvm::DenseMap<const Decl*, llvm::Value*> ldm);
+                                        const DeclMapTy &ldm);
 
-  llvm::Value *LoadBlockStruct();
+  llvm::Constant *GenerateCopyHelperFunction(const CGBlockInfo &blockInfo);
+  llvm::Constant *GenerateDestroyHelperFunction(const CGBlockInfo &blockInfo);
+
+  llvm::Constant *GeneratebyrefCopyHelperFunction(const llvm::Type *,
+                                                  BlockFieldFlags flags,
+                                                  const VarDecl *BD);
+  llvm::Constant *GeneratebyrefDestroyHelperFunction(const llvm::Type *T, 
+                                                     BlockFieldFlags flags, 
+                                                     const VarDecl *BD);
+
+  void BuildBlockRelease(llvm::Value *DeclPtr, BlockFieldFlags flags);
+
+  llvm::Value *LoadBlockStruct() {
+    assert(BlockPointer && "no block pointer set!");
+    return BlockPointer;
+  }
 
   void AllocateBlockCXXThisPointer(const CXXThisExpr *E);
   void AllocateBlockDecl(const BlockDeclRefExpr *E);
   llvm::Value *GetAddrOfBlockDecl(const BlockDeclRefExpr *E) {
     return GetAddrOfBlockDecl(E->getDecl(), E->isByRef());
   }
-  llvm::Value *GetAddrOfBlockDecl(const ValueDecl *D, bool ByRef);
-  const llvm::Type *BuildByRefType(const ValueDecl *D);
+  llvm::Value *GetAddrOfBlockDecl(const VarDecl *var, bool ByRef);
+  const llvm::Type *BuildByRefType(const VarDecl *var);
 
   void GenerateCode(GlobalDecl GD, llvm::Function *Fn);
   void StartFunction(GlobalDecl GD, QualType RetTy,
@@ -907,6 +1087,9 @@ public:
   /// function instrumentation is enabled.
   void EmitFunctionInstrumentation(const char *Fn);
 
+  /// EmitMCountInstrumentation - Emit call to .mcount.
+  void EmitMCountInstrumentation();
+
   /// EmitFunctionProlog - Emit the target specific LLVM code to load the
   /// arguments for the given function. This is also responsible for naming the
   /// LLVM function arguments.
@@ -950,13 +1133,13 @@ public:
   static bool hasAggregateLLVMType(QualType T);
 
   /// createBasicBlock - Create an LLVM basic block.
-  llvm::BasicBlock *createBasicBlock(const char *Name="",
-                                     llvm::Function *Parent=0,
-                                     llvm::BasicBlock *InsertBefore=0) {
+  llvm::BasicBlock *createBasicBlock(llvm::StringRef name = "",
+                                     llvm::Function *parent = 0,
+                                     llvm::BasicBlock *before = 0) {
 #ifdef NDEBUG
-    return llvm::BasicBlock::Create(VMContext, "", Parent, InsertBefore);
+    return llvm::BasicBlock::Create(getLLVMContext(), "", parent, before);
 #else
-    return llvm::BasicBlock::Create(VMContext, Name, Parent, InsertBefore);
+    return llvm::BasicBlock::Create(getLLVMContext(), name, parent, before);
 #endif
   }
 
@@ -1043,6 +1226,9 @@ public:
   AggValueSlot CreateAggTemp(QualType T, const llvm::Twine &Name = "tmp") {
     return AggValueSlot::forAddr(CreateMemTemp(T, Name), false, false);
   }
+
+  /// Emit a cast to void* in the appropriate address space.
+  llvm::Value *EmitCastToVoidPtr(llvm::Value *value);
 
   /// EvaluateExprAsBool - Perform the usual unary conversions on the specified
   /// expression and compare the result against zero, returning an Int1Ty value.
@@ -1255,7 +1441,8 @@ public:
                          llvm::GlobalValue::LinkageTypes Linkage);
 
   /// EmitParmDecl - Emit a ParmVarDecl or an ImplicitParamDecl.
-  void EmitParmDecl(const VarDecl &D, llvm::Value *Arg);
+  void EmitParmDecl(const VarDecl &D, llvm::Value *Arg, 
+                    bool IndirectArgument = false);
 
   //===--------------------------------------------------------------------===//
   //                             Statement Emission
@@ -1456,7 +1643,7 @@ public:
 
   LValue EmitCXXConstructLValue(const CXXConstructExpr *E);
   LValue EmitCXXBindTemporaryLValue(const CXXBindTemporaryExpr *E);
-  LValue EmitCXXExprWithTemporariesLValue(const CXXExprWithTemporaries *E);
+  LValue EmitExprWithCleanupsLValue(const ExprWithCleanups *E);
   LValue EmitCXXTypeidLValue(const CXXTypeidExpr *E);
 
   LValue EmitObjCMessageExprLValue(const ObjCMessageExpr *E);
@@ -1500,6 +1687,13 @@ public:
                                 const llvm::Type *Ty);
   llvm::Value *BuildVirtualCall(const CXXDestructorDecl *DD, CXXDtorType Type,
                                 llvm::Value *This, const llvm::Type *Ty);
+  llvm::Value *BuildAppleKextVirtualCall(const CXXMethodDecl *MD, 
+                                         NestedNameSpecifier *Qual,
+                                         const llvm::Type *Ty);
+  
+  llvm::Value *BuildAppleKextVirtualDestructorCall(const CXXDestructorDecl *DD,
+                                                   CXXDtorType Type, 
+                                                   const CXXRecordDecl *RD);
 
   RValue EmitCXXMemberCall(const CXXMethodDecl *MD,
                            llvm::Value *Callee,
@@ -1530,10 +1724,9 @@ public:
   llvm::Value *EmitARMBuiltinExpr(unsigned BuiltinID, const CallExpr *E);
   llvm::Value *EmitNeonCall(llvm::Function *F,
                             llvm::SmallVectorImpl<llvm::Value*> &O,
-                            const char *name, bool splat = false,
+                            const char *name,
                             unsigned shift = 0, bool rightshift = false);
-  llvm::Value *EmitNeonSplat(llvm::Value *V, llvm::Constant *Idx,
-                             bool widen = false);
+  llvm::Value *EmitNeonSplat(llvm::Value *V, llvm::Constant *Idx);
   llvm::Value *EmitNeonShiftVector(llvm::Value *V, const llvm::Type *Ty,
                                    bool negateForRightShift);
 
@@ -1656,8 +1849,8 @@ public:
   void EmitSynthesizedCXXCopyCtor(llvm::Value *Dest, llvm::Value *Src,
                                   const Expr *Exp);
 
-  RValue EmitCXXExprWithTemporaries(const CXXExprWithTemporaries *E,
-                                    AggValueSlot Slot =AggValueSlot::ignored());
+  RValue EmitExprWithCleanups(const ExprWithCleanups *E,
+                              AggValueSlot Slot =AggValueSlot::ignored());
 
   void EmitCXXThrowExpr(const CXXThrowExpr *E);
 
@@ -1783,38 +1976,76 @@ private:
   void EmitDeclMetadata();
 };
 
-/// CGBlockInfo - Information to generate a block literal.
-class CGBlockInfo {
-public:
-  /// Name - The name of the block, kindof.
-  const char *Name;
+/// Helper class with most of the code for saving a value for a
+/// conditional expression cleanup.
+struct DominatingLLVMValue {
+  typedef llvm::PointerIntPair<llvm::Value*, 1, bool> saved_type;
 
-  /// DeclRefs - Variables from parent scopes that have been
-  /// imported into this block.
-  llvm::SmallVector<const BlockDeclRefExpr *, 8> DeclRefs;
+  /// Answer whether the given value needs extra work to be saved.
+  static bool needsSaving(llvm::Value *value) {
+    // If it's not an instruction, we don't need to save.
+    if (!isa<llvm::Instruction>(value)) return false;
 
-  /// InnerBlocks - This block and the blocks it encloses.
-  llvm::SmallPtrSet<const DeclContext *, 4> InnerBlocks;
+    // If it's an instruction in the entry block, we don't need to save.
+    llvm::BasicBlock *block = cast<llvm::Instruction>(value)->getParent();
+    return (block != &block->getParent()->getEntryBlock());
+  }
 
-  /// CXXThisRef - Non-null if 'this' was required somewhere, in
-  /// which case this is that expression.
-  const CXXThisExpr *CXXThisRef;
+  /// Try to save the given value.
+  static saved_type save(CodeGenFunction &CGF, llvm::Value *value) {
+    if (!needsSaving(value)) return saved_type(value, false);
 
-  /// NeedsObjCSelf - True if something in this block has an implicit
-  /// reference to 'self'.
-  bool NeedsObjCSelf : 1;
-  
-  /// HasCXXObject - True if block has imported c++ object requiring copy
-  /// construction in copy helper and destruction in copy dispose helpers.
-  bool HasCXXObject : 1;
-  
-  /// These are initialized by GenerateBlockFunction.
-  bool BlockHasCopyDispose : 1;
-  CharUnits BlockSize;
-  CharUnits BlockAlign;
-  llvm::SmallVector<const Expr*, 8> BlockLayout;
+    // Otherwise we need an alloca.
+    llvm::Value *alloca =
+      CGF.CreateTempAlloca(value->getType(), "cond-cleanup.save");
+    CGF.Builder.CreateStore(value, alloca);
 
-  CGBlockInfo(const char *Name);
+    return saved_type(alloca, true);
+  }
+
+  static llvm::Value *restore(CodeGenFunction &CGF, saved_type value) {
+    if (!value.getInt()) return value.getPointer();
+    return CGF.Builder.CreateLoad(value.getPointer());
+  }
+};
+
+/// A partial specialization of DominatingValue for llvm::Values that
+/// might be llvm::Instructions.
+template <class T> struct DominatingPointer<T,true> : DominatingLLVMValue {
+  typedef T *type;
+  static type restore(CodeGenFunction &CGF, saved_type value) {
+    return static_cast<T*>(DominatingLLVMValue::restore(CGF, value));
+  }
+};
+
+/// A specialization of DominatingValue for RValue.
+template <> struct DominatingValue<RValue> {
+  typedef RValue type;
+  class saved_type {
+    enum Kind { ScalarLiteral, ScalarAddress, AggregateLiteral,
+                AggregateAddress, ComplexAddress };
+
+    llvm::Value *Value;
+    Kind K;
+    saved_type(llvm::Value *v, Kind k) : Value(v), K(k) {}
+
+  public:
+    static bool needsSaving(RValue value);
+    static saved_type save(CodeGenFunction &CGF, RValue value);
+    RValue restore(CodeGenFunction &CGF);
+
+    // implementations in CGExprCXX.cpp
+  };
+
+  static bool needsSaving(type value) {
+    return saved_type::needsSaving(value);
+  }
+  static saved_type save(CodeGenFunction &CGF, type value) {
+    return saved_type::save(CGF, value);
+  }
+  static type restore(CodeGenFunction &CGF, saved_type value) {
+    return value.restore(CGF);
+  }
 };
 
 }  // end namespace CodeGen

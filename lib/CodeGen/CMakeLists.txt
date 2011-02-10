@@ -1,5 +1,3 @@
-set(LLVM_NO_RTTI 1)
-
 set(LLVM_USED_LIBS clangBasic clangAST clangFrontend)
 
 add_clang_library(clangCodeGen
@@ -10,6 +8,7 @@ add_clang_library(clangCodeGen
   CGClass.cpp
   CGCXX.cpp
   CGCXXABI.cpp
+  CGCleanup.cpp
   CGDebugInfo.cpp
   CGDecl.cpp
   CGDeclCXX.cpp
@@ -35,7 +34,6 @@ add_clang_library(clangCodeGen
   CodeGenTBAA.cpp
   CodeGenTypes.cpp
   ItaniumCXXABI.cpp
-  Mangle.cpp
   MicrosoftCXXABI.cpp
   ModuleBuilder.cpp
   TargetInfo.cpp

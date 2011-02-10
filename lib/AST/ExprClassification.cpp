@@ -90,6 +90,7 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   switch (E->getStmtClass()) {
     // First come the expressions that are always lvalues, unconditionally.
   case Stmt::NoStmtClass:
+#define ABSTRACT_STMT(Kind)
 #define STMT(Kind, Base) case Expr::Kind##Class:
 #define EXPR(Kind, Base)
 #include "clang/AST/StmtNodes.inc"
@@ -130,7 +131,6 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::CXXNewExprClass:
   case Expr::CXXThisExprClass:
   case Expr::CXXNullPtrLiteralExprClass:
-  case Expr::TypesCompatibleExprClass:
   case Expr::ImaginaryLiteralClass:
   case Expr::GNUNullExprClass:
   case Expr::OffsetOfExprClass:
@@ -146,11 +146,14 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::CXXNoexceptExprClass:
   case Expr::CXXScalarValueInitExprClass:
   case Expr::UnaryTypeTraitExprClass:
+  case Expr::BinaryTypeTraitExprClass:
   case Expr::ObjCSelectorExprClass:
   case Expr::ObjCProtocolExprClass:
   case Expr::ObjCStringLiteralClass:
   case Expr::ParenListExprClass:
   case Expr::InitListExprClass:
+  case Expr::SizeOfPackExprClass:
+  case Expr::SubstNonTypeTemplateParmPackExprClass:
     return Cl::CL_PRValue;
 
     // Next come the complicated cases.
@@ -235,6 +238,7 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::CallExprClass:
   case Expr::CXXOperatorCallExprClass:
   case Expr::CXXMemberCallExprClass:
+  case Expr::CUDAKernelCallExprClass:
     return ClassifyUnnamed(Ctx, cast<CallExpr>(E)->getCallReturnType());
 
     // __builtin_choose_expr is equivalent to the chosen expression.
@@ -255,9 +259,9 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::CXXBindTemporaryExprClass:
     return ClassifyInternal(Ctx, cast<CXXBindTemporaryExpr>(E)->getSubExpr());
 
-    // And the temporary lifetime guard.
-  case Expr::CXXExprWithTemporariesClass:
-    return ClassifyInternal(Ctx, cast<CXXExprWithTemporaries>(E)->getSubExpr());
+    // And the cleanups guard.
+  case Expr::ExprWithCleanupsClass:
+    return ClassifyInternal(Ctx, cast<ExprWithCleanups>(E)->getSubExpr());
 
     // Casts depend completely on the target type. All casts work the same.
   case Expr::CStyleCastExprClass:
@@ -303,7 +307,10 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   }
       
   case Expr::CXXUuidofExprClass:
-    return Cl::CL_PRValue;
+    return Cl::CL_LValue;
+      
+  case Expr::PackExpansionExprClass:
+    return ClassifyInternal(Ctx, cast<PackExpansionExpr>(E)->getPattern());
   }
   
   llvm_unreachable("unhandled expression kind in classification");
@@ -515,7 +522,7 @@ static Cl::ModifiableType IsModifiable(ASTContext &Ctx, const Expr *E,
 
   // Records with any const fields (recursively) are not modifiable.
   if (const RecordType *R = CT->getAs<RecordType>()) {
-    assert((isa<ObjCPropertyRefExpr>(E) ||
+    assert((E->getObjectKind() == OK_ObjCProperty ||
             !Ctx.getLangOptions().CPlusPlus) &&
            "C++ struct assignment should be resolved by the "
            "copy assignment operator.");

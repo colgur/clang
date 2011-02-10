@@ -20,6 +20,7 @@
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/TemplateBase.h"
 #include "clang/Lex/ExternalPreprocessorSource.h"
+#include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/PreprocessingRecord.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/IdentifierTable.h"
@@ -53,7 +54,7 @@ class Decl;
 class DeclContext;
 class NestedNameSpecifier;
 class CXXBaseSpecifier;
-class CXXBaseOrMemberInitializer;
+class CXXCtorInitializer;
 class GotoStmt;
 class LabelStmt;
 class MacroDefinition;
@@ -165,10 +166,12 @@ private:
 class ASTReader
   : public ExternalPreprocessorSource,
     public ExternalPreprocessingRecordSource,
+    public ExternalHeaderFileInfoSource,
     public ExternalSemaSource,
     public IdentifierInfoLookup,
     public ExternalIdentifierLookup,
-    public ExternalSLocEntrySource {
+    public ExternalSLocEntrySource 
+{
 public:
   enum ASTReadResult { Success, Failure, IgnorePCH };
   /// \brief Types of AST files.
@@ -261,7 +264,7 @@ private:
     /// stored.
     const uint32_t *IdentifierOffsets;
 
-    /// \brief Actual data for the on-disk hash table.
+    /// \brief Actual data for the on-disk hash table of identifiers.
     ///
     /// This pointer points into a memory buffer, where the on-disk hash
     /// table for identifiers actually lives.
@@ -280,13 +283,38 @@ private:
     /// \brief The offset of the start of the set of defined macros.
     uint64_t MacroStartOffset;
     
+    // === Detailed PreprocessingRecord ===
+    
+    /// \brief The cursor to the start of the (optional) detailed preprocessing 
+    /// record block.
+    llvm::BitstreamCursor PreprocessorDetailCursor;
+    
+    /// \brief The offset of the start of the preprocessor detail cursor.
+    uint64_t PreprocessorDetailStartOffset;
+    
     /// \brief The number of macro definitions in this file.
     unsigned LocalNumMacroDefinitions;
-
+    
     /// \brief Offsets of all of the macro definitions in the preprocessing
     /// record in the AST file.
     const uint32_t *MacroDefinitionOffsets;
 
+    // === Header search information ===
+    
+    /// \brief The number of local HeaderFileInfo structures.
+    unsigned LocalNumHeaderFileInfos;
+    
+    /// \brief Actual data for the on-disk hash table of header file 
+    /// information.
+    ///
+    /// This pointer points into a memory buffer, where the on-disk hash
+    /// table for header file information actually lives.
+    const char *HeaderFileInfoTableData;
+
+    /// \brief The on-disk hash table that contains information about each of
+    /// the header files.
+    void *HeaderFileInfoTable;
+    
     // === Selectors ===
 
     /// \brief The number of selectors new to this file.
@@ -566,10 +594,16 @@ private:
   /// The AST context tracks a few important types, such as va_list, directly.
   llvm::SmallVector<uint64_t, 16> SpecialTypes;
 
+  /// \brief The IDs of CUDA-specific declarations ASTContext stores directly.
+  ///
+  /// The AST context tracks a few important decls, currently cudaConfigureCall,
+  /// directly.
+  llvm::SmallVector<uint64_t, 2> CUDASpecialDeclRefs;
+
   //@}
 
   /// \brief Diagnostic IDs and their mappings that the user changed.
-  llvm::SmallVector<uint64_t, 8> UserDiagMappings;
+  llvm::SmallVector<uint64_t, 8> PragmaDiagMappings;
 
   /// \brief The original file name that was used to build the primary AST file,
   /// which may have been modified for relocatable-pch support.
@@ -590,6 +624,9 @@ private:
   /// headers when they are loaded.
   bool DisableValidation;
       
+  /// \brief Whether to disable the use of stat caches in AST files.
+  bool DisableStatCache;
+
   /// \brief Mapping from switch-case IDs in the chain to switch-case statements
   ///
   /// Statements usually don't have IDs, but switch cases need them, so that the
@@ -783,8 +820,14 @@ public:
   /// \param DisableValidation If true, the AST reader will suppress most
   /// of its regular consistency checking, allowing the use of precompiled
   /// headers that cannot be determined to be compatible.
+  ///
+  /// \param DisableStatCache If true, the AST reader will ignore the
+  /// stat cache in the AST files. This performance pessimization can
+  /// help when an AST file is being used in cases where the
+  /// underlying files in the file system may have changed, but
+  /// parsing should still continue.
   ASTReader(Preprocessor &PP, ASTContext *Context, const char *isysroot = 0,
-            bool DisableValidation = false);
+            bool DisableValidation = false, bool DisableStatCache = false);
 
   /// \brief Load the AST file without using any pre-initialized Preprocessor.
   ///
@@ -805,9 +848,15 @@ public:
   /// \param DisableValidation If true, the AST reader will suppress most
   /// of its regular consistency checking, allowing the use of precompiled
   /// headers that cannot be determined to be compatible.
+  ///
+  /// \param DisableStatCache If true, the AST reader will ignore the
+  /// stat cache in the AST files. This performance pessimization can
+  /// help when an AST file is being used in cases where the
+  /// underlying files in the file system may have changed, but
+  /// parsing should still continue.
   ASTReader(SourceManager &SourceMgr, FileManager &FileMgr,
             Diagnostic &Diags, const char *isysroot = 0,
-            bool DisableValidation = false);
+            bool DisableValidation = false, bool DisableStatCache = false);
   ~ASTReader();
 
   /// \brief Load the precompiled header designated by the given file
@@ -851,7 +900,10 @@ public:
   /// \brief Read the preprocessed entity at the given offset.
   virtual PreprocessedEntity *ReadPreprocessedEntity(uint64_t Offset);
 
-  void ReadUserDiagnosticMappings(Diagnostic &Diag);
+  /// \brief Read the header file information for the given file entry.
+  virtual HeaderFileInfo GetHeaderFileInfo(const FileEntry *FE);
+
+  void ReadPragmaDiagnosticMappings(Diagnostic &Diag);
 
   /// \brief Returns the number of source locations found in the chain.
   unsigned getTotalNumSLocs() const {
@@ -1073,7 +1125,8 @@ public:
                                                unsigned &Idx);
 
   /// \brief Read a template name.
-  TemplateName ReadTemplateName(const RecordData &Record, unsigned &Idx);
+  TemplateName ReadTemplateName(PerFileData &F, const RecordData &Record, 
+                                unsigned &Idx);
 
   /// \brief Read a template argument.
   TemplateArgument ReadTemplateArgument(PerFileData &F,
@@ -1098,10 +1151,10 @@ public:
   CXXBaseSpecifier ReadCXXBaseSpecifier(PerFileData &F,
                                         const RecordData &Record,unsigned &Idx);
 
-  /// \brief Read a CXXBaseOrMemberInitializer array.
-  std::pair<CXXBaseOrMemberInitializer **, unsigned>
-  ReadCXXBaseOrMemberInitializers(PerFileData &F,
-                                  const RecordData &Record, unsigned &Idx);
+  /// \brief Read a CXXCtorInitializer array.
+  std::pair<CXXCtorInitializer **, unsigned>
+  ReadCXXCtorInitializers(PerFileData &F, const RecordData &Record,
+                          unsigned &Idx);
 
   /// \brief Read a source location from raw form.
   SourceLocation ReadSourceLocation(PerFileData &Module, unsigned Raw) {
@@ -1159,6 +1212,10 @@ public:
   /// \brief Reads the macro record located at the given offset.
   PreprocessedEntity *ReadMacroRecord(PerFileData &F, uint64_t Offset);
 
+  /// \brief Reads the preprocessed entity located at the current stream
+  /// position.
+  PreprocessedEntity *LoadPreprocessedEntity(PerFileData &F);
+      
   /// \brief Note that the identifier is a macro whose record will be loaded
   /// from the given AST file at the given (file-local) offset.
   void SetIdentifierIsMacro(IdentifierInfo *II, PerFileData &F,

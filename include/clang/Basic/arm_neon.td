@@ -16,16 +16,34 @@ class Op;
 
 def OP_NONE  : Op;
 def OP_ADD   : Op;
+def OP_ADDL  : Op;
+def OP_ADDW  : Op;
 def OP_SUB   : Op;
+def OP_SUBL  : Op;
+def OP_SUBW  : Op;
 def OP_MUL   : Op;
+def OP_MULL  : Op;
 def OP_MLA   : Op;
+def OP_MLAL  : Op;
 def OP_MLS   : Op;
+def OP_MLSL  : Op;
 def OP_MUL_N : Op;
+def OP_MULL_N: Op;
 def OP_MLA_N : Op;
 def OP_MLS_N : Op;
+def OP_MLAL_N : Op;
+def OP_MLSL_N : Op;
 def OP_MUL_LN: Op;
+def OP_MULL_LN : Op;
 def OP_MLA_LN: Op;
 def OP_MLS_LN: Op;
+def OP_MLAL_LN : Op;
+def OP_MLSL_LN : Op;
+def OP_QDMULL_LN : Op;
+def OP_QDMLAL_LN : Op;
+def OP_QDMLSL_LN : Op;
+def OP_QDMULH_LN : Op;
+def OP_QRDMULH_LN : Op;
 def OP_EQ    : Op;
 def OP_GE    : Op;
 def OP_LE    : Op;
@@ -43,10 +61,15 @@ def OP_HI    : Op;
 def OP_LO    : Op;
 def OP_CONC  : Op;
 def OP_DUP   : Op;
+def OP_DUP_LN: Op;
 def OP_SEL   : Op;
 def OP_REV64 : Op;
 def OP_REV32 : Op;
 def OP_REV16 : Op;
+def OP_REINT : Op;
+def OP_ABDL  : Op;
+def OP_ABA   : Op;
+def OP_ABAL  : Op;
 
 class Inst <string n, string p, string t, Op o> {
   string Name = n;
@@ -101,38 +124,39 @@ class WInst<string n, string p, string t> : Inst<n, p, t, OP_NONE> {}
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.1 Addition
 def VADD : Inst<"vadd", "ddd", "csilfUcUsUiUlQcQsQiQlQfQUcQUsQUiQUl", OP_ADD>;
-def VADDL   : SInst<"vaddl", "wdd", "csiUcUsUi">;
-def VADDW   : SInst<"vaddw", "wwd", "csiUcUsUi">;
+def VADDL   : Inst<"vaddl", "wdd", "csiUcUsUi", OP_ADDL>;
+def VADDW   : Inst<"vaddw", "wwd", "csiUcUsUi", OP_ADDW>;
 def VHADD   : SInst<"vhadd", "ddd", "csiUcUsUiQcQsQiQUcQUsQUi">;
 def VRHADD  : SInst<"vrhadd", "ddd", "csiUcUsUiQcQsQiQUcQUsQUi">;
 def VQADD   : SInst<"vqadd", "ddd", "csilUcUsUiUlQcQsQiQlQUcQUsQUiQUl">;
-def VADDHN  : IInst<"vaddhn", "dww", "csiUcUsUi">;
-def VRADDHN : IInst<"vraddhn", "dww", "csiUcUsUi">;
+def VADDHN  : IInst<"vaddhn", "hkk", "silUsUiUl">;
+def VRADDHN : IInst<"vraddhn", "hkk", "silUsUiUl">;
 
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.2 Multiplication
 def VMUL     : Inst<"vmul", "ddd", "csifUcUsUiQcQsQiQfQUcQUsQUi", OP_MUL>;
 def VMULP    : SInst<"vmul", "ddd", "PcQPc">;
 def VMLA     : Inst<"vmla", "dddd", "csifUcUsUiQcQsQiQfQUcQUsQUi", OP_MLA>;
-def VMLAL    : SInst<"vmlal", "wwdd", "csiUcUsUi">;
+def VMLAL    : Inst<"vmlal", "wwdd", "csiUcUsUi", OP_MLAL>;
 def VMLS     : Inst<"vmls", "dddd", "csifUcUsUiQcQsQiQfQUcQUsQUi", OP_MLS>;
-def VMLSL    : SInst<"vmlsl", "wwdd", "csiUcUsUi">;
+def VMLSL    : Inst<"vmlsl", "wwdd", "csiUcUsUi", OP_MLSL>;
 def VQDMULH  : SInst<"vqdmulh", "ddd", "siQsQi">;
 def VQRDMULH : SInst<"vqrdmulh", "ddd", "siQsQi">;
 def VQDMLAL  : SInst<"vqdmlal", "wwdd", "si">;
 def VQDMLSL  : SInst<"vqdmlsl", "wwdd", "si">;
-def VMULL    : SInst<"vmull", "wdd", "csiUcUsUiPc">;
+def VMULL    : Inst<"vmull", "wdd", "csiUcUsUi", OP_MULL>;
+def VMULLP   : SInst<"vmull", "wdd", "Pc">;
 def VQDMULL  : SInst<"vqdmull", "wdd", "si">;
 
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.3 Subtraction
 def VSUB : Inst<"vsub", "ddd", "csilfUcUsUiUlQcQsQiQlQfQUcQUsQUiQUl", OP_SUB>;
-def VSUBL   : SInst<"vsubl", "wdd", "csiUcUsUi">;
-def VSUBW   : SInst<"vsubw", "wwd", "csiUcUsUi">;
+def VSUBL   : Inst<"vsubl", "wdd", "csiUcUsUi", OP_SUBL>;
+def VSUBW   : Inst<"vsubw", "wwd", "csiUcUsUi", OP_SUBW>;
 def VQSUB   : SInst<"vqsub", "ddd", "csilUcUsUiUlQcQsQiQlQUcQUsQUiQUl">;
 def VHSUB   : SInst<"vhsub", "ddd", "csiUcUsUiQcQsQiQUcQUsQUi">;
-def VSUBHN  : IInst<"vsubhn", "dww", "csiUcUsUi">;
-def VRSUBHN : IInst<"vrsubhn", "dww", "csiUcUsUi">;
+def VSUBHN  : IInst<"vsubhn", "hkk", "silUsUiUl">;
+def VRSUBHN : IInst<"vrsubhn", "hkk", "silUsUiUl">;
 
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.4 Comparison
@@ -150,9 +174,9 @@ def VTST  : WInst<"vtst", "udd", "csiUcUsUiPcQcQsQiQUcQUsQUiQPc">;
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.5 Absolute Difference
 def VABD  : SInst<"vabd", "ddd",  "csiUcUsUifQcQsQiQUcQUsQUiQf">;
-def VABDL : SInst<"vabdl", "wdd",  "csiUcUsUi">;
-def VABA  : SInst<"vaba", "dddd", "csiUcUsUiQcQsQiQUcQUsQUi">;
-def VABAL : SInst<"vabal", "wwdd", "csiUcUsUi">;
+def VABDL : Inst<"vabdl", "wdd",  "csiUcUsUi", OP_ABDL>;
+def VABA  : Inst<"vaba", "dddd", "csiUcUsUiQcQsQiQUcQUsQUi", OP_ABA>;
+def VABAL : Inst<"vabal", "wwdd", "csiUcUsUi", OP_ABAL>;
 
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.6 Max/Min
@@ -259,8 +283,8 @@ def VDUP_N : Inst<"vdup_n", "ds",
                   "UcUsUicsiPcPsfQUcQUsQUiQcQsQiQPcQPsQflUlQlQUl", OP_DUP>;
 def VMOV_N : Inst<"vmov_n", "ds",
                   "UcUsUicsiPcPsfQUcQUsQUiQcQsQiQPcQPsQflUlQlQUl", OP_DUP>;
-def VDUP_LANE : WInst<"vdup_lane", "dgi",
-                      "UcUsUicsiPcPsfQUcQUsQUiQcQsQiQPcQPsQflUlQlQUl">;
+def VDUP_LANE : Inst<"vdup_lane", "dgi",
+                     "UcUsUicsiPcPsfQUcQUsQUiQcQsQiQPcQPsQflUlQlQUl",OP_DUP_LN>;
 
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.20 Combining vectors
@@ -279,7 +303,7 @@ def VCVT_F16     : SInst<"vcvt_f16", "hk",  "f">;
 def VCVT_N_S32   : SInst<"vcvt_n_s32", "xdi", "fQf">;
 def VCVT_N_U32   : SInst<"vcvt_n_u32", "udi", "fQf">;
 def VCVT_F32     : SInst<"vcvt_f32", "fd",  "iUiQiQUi">;
-def VCVT_F32_F16 : SInst<"vcvt_f32_f16", "kh",  "f">;
+def VCVT_F32_F16 : SInst<"vcvt_f32_f16", "fd",  "h">;
 def VCVT_N_F32   : SInst<"vcvt_n_f32", "fdi", "iUiQiQUi">;
 def VMOVN        : IInst<"vmovn", "hk",  "silUsUiUl">;
 def VMOVL        : SInst<"vmovl", "wd",  "csiUcUsUi">;
@@ -299,27 +323,27 @@ def VTBX4 : WInst<"vtbx4", "dd4t", "UccPc">;
 
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.25 Operations with a scalar value
-def VMLA_LANE    : Inst<"vmla_lane", "ddddi", "siUsUifQsQiQUsQUiQf", OP_MLA_LN>;
-def VMLAL_LANE   : SInst<"vmlal_lane", "wwddi", "siUsUi">;
-def VQDMLAL_LANE : SInst<"vqdmlal_lane", "wwddi", "si">; 
-def VMLS_LANE    : Inst<"vmls_lane", "ddddi", "siUsUifQsQiQUsQUiQf", OP_MLS_LN>;
-def VMLSL_LANE   : SInst<"vmlsl_lane", "wwddi", "siUsUi">;
-def VQDMLSL_LANE : SInst<"vqdmlsl_lane", "wwddi", "si">;
+def VMLA_LANE    : Inst<"vmla_lane", "dddgi", "siUsUifQsQiQUsQUiQf", OP_MLA_LN>;
+def VMLAL_LANE   : Inst<"vmlal_lane", "wwddi", "siUsUi", OP_MLAL_LN>;
+def VQDMLAL_LANE : Inst<"vqdmlal_lane", "wwddi", "si", OP_QDMLAL_LN>; 
+def VMLS_LANE    : Inst<"vmls_lane", "dddgi", "siUsUifQsQiQUsQUiQf", OP_MLS_LN>;
+def VMLSL_LANE   : Inst<"vmlsl_lane", "wwddi", "siUsUi", OP_MLSL_LN>;
+def VQDMLSL_LANE : Inst<"vqdmlsl_lane", "wwddi", "si", OP_QDMLSL_LN>;
 def VMUL_N       : Inst<"vmul_n", "dds", "sifUsUiQsQiQfQUsQUi", OP_MUL_N>;
-def VMUL_LANE    : Inst<"vmul_lane", "dddi", "sifUsUiQsQiQfQUsQUi", OP_MUL_LN>;
-def VMULL_N      : SInst<"vmull_n", "wda", "siUsUi">;
-def VMULL_LANE   : SInst<"vmull_lane", "wddi", "siUsUi">;
+def VMUL_LANE    : Inst<"vmul_lane", "ddgi", "sifUsUiQsQiQfQUsQUi", OP_MUL_LN>;
+def VMULL_N      : Inst<"vmull_n", "wda", "siUsUi", OP_MULL_N>;
+def VMULL_LANE   : Inst<"vmull_lane", "wddi", "siUsUi", OP_MULL_LN>;
 def VQDMULL_N    : SInst<"vqdmull_n", "wda", "si">;
-def VQDMULL_LANE : SInst<"vqdmull_lane", "wddi", "si">;
+def VQDMULL_LANE : Inst<"vqdmull_lane", "wddi", "si", OP_QDMULL_LN>;
 def VQDMULH_N    : SInst<"vqdmulh_n", "dda", "siQsQi">;
-def VQDMULH_LANE : SInst<"vqdmulh_lane", "dddi", "siQsQi">;
+def VQDMULH_LANE : Inst<"vqdmulh_lane", "ddgi", "siQsQi", OP_QDMULH_LN>;
 def VQRDMULH_N   : SInst<"vqrdmulh_n", "dda", "siQsQi">;
-def VQRDMULH_LANE : SInst<"vqrdmulh_lane", "dddi", "siQsQi">;
+def VQRDMULH_LANE : Inst<"vqrdmulh_lane", "ddgi", "siQsQi", OP_QRDMULH_LN>;
 def VMLA_N       : Inst<"vmla_n", "ddda", "siUsUifQsQiQUsQUiQf", OP_MLA_N>;
-def VMLAL_N      : SInst<"vmlal_n", "wwda", "siUsUi">;
+def VMLAL_N      : Inst<"vmlal_n", "wwda", "siUsUi", OP_MLAL_N>;
 def VQDMLAL_N    : SInst<"vqdmlal_n", "wwda", "si">;
 def VMLS_N       : Inst<"vmls_n", "ddds", "siUsUifQsQiQUsQUiQf", OP_MLS_N>;
-def VMLSL_N      : SInst<"vmlsl_n", "wwda", "siUsUi">;
+def VMLSL_N      : Inst<"vmlsl_n", "wwda", "siUsUi", OP_MLSL_N>;
 def VQDMLSL_N    : SInst<"vqdmlsl_n", "wwda", "si">;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -331,7 +355,7 @@ def VEXT : WInst<"vext", "dddi",
 // E.3.27 Reverse vector elements (sdap endianness)
 def VREV64 : Inst<"vrev64", "dd", "csiUcUsUiPcPsfQcQsQiQUcQUsQUiQPcQPsQf",
                   OP_REV64>;
-def VREV32 : Inst<"vrev32", "dd", "csUcUsPcQcQsQUcQUsQPc", OP_REV32>;
+def VREV32 : Inst<"vrev32", "dd", "csUcUsPcPsQcQsQUcQUsQPcQPs", OP_REV32>;
 def VREV16 : Inst<"vrev16", "dd", "cUcPcQcQUcQPc", OP_REV16>;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -359,9 +383,13 @@ def VBSL : Inst<"vbsl", "dudd",
 
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.30 Transposition operations
-def VTRN: WInst<"vtrn", "2dd", "csiUcUsUifPcPsQcQsQiQUcQUsQUiQfQPcQPs">;
-def VZIP: WInst<"vzip", "2dd", "csUcUsfPcPsQcQsQiQUcQUsQUiQfQPcQPs">;
-def VUZP: WInst<"vuzp", "2dd", "csiUcUsUifPcPsQcQsQiQUcQUsQUiQfQPcQPs">;
+def VTRN : WInst<"vtrn", "2dd", "csiUcUsUifPcPsQcQsQiQUcQUsQUiQfQPcQPs">;
+def VZIP : WInst<"vzip", "2dd", "csiUcUsUifPcPsQcQsQiQUcQUsQUiQfQPcQPs">;
+def VUZP : WInst<"vuzp", "2dd", "csiUcUsUifPcPsQcQsQiQUcQUsQUiQfQPcQPs">;
 
 ////////////////////////////////////////////////////////////////////////////////
 // E.3.31 Vector reinterpret cast operations
+def VREINTERPRET
+  : Inst<"vreinterpret", "dd",
+         "csilUcUsUiUlhfPcPsQcQsQiQlQUcQUsQUiQUlQhQfQPcQPs", OP_REINT>;
+

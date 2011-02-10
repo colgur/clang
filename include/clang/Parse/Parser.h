@@ -112,6 +112,10 @@ class Parser : public CodeCompletionHandler {
   IdentifierInfo *Ident_vector;
   IdentifierInfo *Ident_pixel;
 
+  /// C++0x contextual keywords. 
+  mutable IdentifierInfo *Ident_final;
+  mutable IdentifierInfo *Ident_override;
+
   llvm::OwningPtr<PragmaHandler> AlignHandler;
   llvm::OwningPtr<PragmaHandler> GCCVisibilityHandler;
   llvm::OwningPtr<PragmaHandler> OptionsHandler;
@@ -162,7 +166,7 @@ public:
   typedef Stmt StmtTy;
   typedef OpaquePtr<DeclGroupRef> DeclGroupPtrTy;
   typedef CXXBaseSpecifier BaseTy;
-  typedef CXXBaseOrMemberInitializer MemInitTy;
+  typedef CXXCtorInitializer MemInitTy;
   typedef NestedNameSpecifier CXXScopeTy;
   typedef TemplateParameterList TemplateParamsTy;
   typedef OpaquePtr<TemplateName> TemplateTy;
@@ -344,6 +348,9 @@ private:
   /// matched specific position in the grammar, provide code-completion results
   /// based on context.
   void CodeCompletionRecovery();
+
+  /// \brief Handle the annotation token produced for #pragma unused(...)
+  void HandlePragmaUnused();
 
   /// GetLookAheadToken - This peeks ahead N tokens and returns that token
   /// without consuming any tokens.  LookAhead(0) returns 'Tok', LookAhead(1)
@@ -553,16 +560,17 @@ private:
   /// If SkipUntil finds the specified token, it returns true, otherwise it
   /// returns false.
   bool SkipUntil(tok::TokenKind T, bool StopAtSemi = true,
-                 bool DontConsume = false) {
-    return SkipUntil(&T, 1, StopAtSemi, DontConsume);
+                 bool DontConsume = false, bool StopAtCodeCompletion = false) {
+    return SkipUntil(&T, 1, StopAtSemi, DontConsume, StopAtCodeCompletion);
   }
   bool SkipUntil(tok::TokenKind T1, tok::TokenKind T2, bool StopAtSemi = true,
-                 bool DontConsume = false) {
+                 bool DontConsume = false, bool StopAtCodeCompletion = false) {
     tok::TokenKind TokArray[] = {T1, T2};
-    return SkipUntil(TokArray, 2, StopAtSemi, DontConsume);
+    return SkipUntil(TokArray, 2, StopAtSemi, DontConsume,StopAtCodeCompletion);
   }
   bool SkipUntil(const tok::TokenKind *Toks, unsigned NumToks,
-                 bool StopAtSemi = true, bool DontConsume = false);
+                 bool StopAtSemi = true, bool DontConsume = false,
+                 bool StopAtCodeCompletion = false);
 
   //===--------------------------------------------------------------------===//
   // Lexing and parsing of C++ inline methods.
@@ -902,7 +910,8 @@ private:
   void PopParsingClass();
 
   Decl *ParseCXXInlineMethodDef(AccessSpecifier AS, Declarator &D,
-                                     const ParsedTemplateInfo &TemplateInfo);
+                                const ParsedTemplateInfo &TemplateInfo,
+                                const VirtSpecifiers& VS);
   void ParseLexedMethodDeclarations(ParsingClass &Class);
   void ParseLexedMethodDeclaration(LateParsedMethodDeclaration &LM);
   void ParseLexedMethodDefs(ParsingClass &Class);
@@ -920,14 +929,17 @@ private:
 
   //===--------------------------------------------------------------------===//
   // C99 6.9: External Definitions.
-  DeclGroupPtrTy ParseExternalDeclaration(CXX0XAttributeList Attr,
+  struct ParsedAttributesWithRange : ParsedAttributes {
+    SourceRange Range;
+  };
+
+  DeclGroupPtrTy ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
                                           ParsingDeclSpec *DS = 0);
   bool isDeclarationAfterDeclarator() const;
   bool isStartOfFunctionDefinition(const ParsingDeclarator &Declarator);
-  DeclGroupPtrTy ParseDeclarationOrFunctionDefinition(AttributeList *Attr,
-            AccessSpecifier AS = AS_none);
+  DeclGroupPtrTy ParseDeclarationOrFunctionDefinition(ParsedAttributes &attrs,
+                                                  AccessSpecifier AS = AS_none);
   DeclGroupPtrTy ParseDeclarationOrFunctionDefinition(ParsingDeclSpec &DS,
-                                                  AttributeList *Attr,
                                                   AccessSpecifier AS = AS_none);
   
   Decl *ParseFunctionDefinition(ParsingDeclarator &D,
@@ -942,7 +954,7 @@ private:
   Decl *ParseObjCAtDirectives();
   Decl *ParseObjCAtClassDeclaration(SourceLocation atLoc);
   Decl *ParseObjCAtInterfaceDeclaration(SourceLocation atLoc,
-                                          AttributeList *prefixAttrs = 0);
+                                        ParsedAttributes &prefixAttrs);
   void ParseObjCClassInstanceVariables(Decl *interfaceDecl,
                                        tok::ObjCKeywordKind visibility,
                                        SourceLocation atLoc);
@@ -955,7 +967,7 @@ private:
   void ParseObjCInterfaceDeclList(Decl *interfaceDecl,
                                   tok::ObjCKeywordKind contextKey);
   Decl *ParseObjCAtProtocolDeclaration(SourceLocation atLoc,
-                                           AttributeList *prefixAttrs = 0);
+                                       ParsedAttributes &prefixAttrs);
 
   Decl *ObjCImpDecl;
   llvm::SmallVector<Decl *, 4> PendingObjCImpDecl;
@@ -983,8 +995,7 @@ private:
   Decl *ParseObjCMethodDecl(SourceLocation mLoc, tok::TokenKind mType,
                                 Decl *classDecl,
             tok::ObjCKeywordKind MethodImplKind = tok::objc_not_keyword);
-  void ParseObjCPropertyAttribute(ObjCDeclSpec &DS, Decl *ClassDecl,
-                                  Decl **Methods, unsigned NumMethods);
+  void ParseObjCPropertyAttribute(ObjCDeclSpec &DS, Decl *ClassDecl);
 
   Decl *ParseObjCMethodDefinition();
 
@@ -1190,25 +1201,25 @@ private:
   }
   StmtResult ParseStatementOrDeclaration(StmtVector& Stmts,
                                          bool OnlyStatement = false);
-  StmtResult ParseLabeledStatement(AttributeList *Attr);
-  StmtResult ParseCaseStatement(AttributeList *Attr);
-  StmtResult ParseDefaultStatement(AttributeList *Attr);
-  StmtResult ParseCompoundStatement(AttributeList *Attr,
+  StmtResult ParseLabeledStatement(ParsedAttributes &Attr);
+  StmtResult ParseCaseStatement(ParsedAttributes &Attr);
+  StmtResult ParseDefaultStatement(ParsedAttributes &Attr);
+  StmtResult ParseCompoundStatement(ParsedAttributes &Attr,
                                           bool isStmtExpr = false);
   StmtResult ParseCompoundStatementBody(bool isStmtExpr = false);
   bool ParseParenExprOrCondition(ExprResult &ExprResult,
                                  Decl *&DeclResult,
                                  SourceLocation Loc,
                                  bool ConvertToBoolean);
-  StmtResult ParseIfStatement(AttributeList *Attr);
-  StmtResult ParseSwitchStatement(AttributeList *Attr);
-  StmtResult ParseWhileStatement(AttributeList *Attr);
-  StmtResult ParseDoStatement(AttributeList *Attr);
-  StmtResult ParseForStatement(AttributeList *Attr);
-  StmtResult ParseGotoStatement(AttributeList *Attr);
-  StmtResult ParseContinueStatement(AttributeList *Attr);
-  StmtResult ParseBreakStatement(AttributeList *Attr);
-  StmtResult ParseReturnStatement(AttributeList *Attr);
+  StmtResult ParseIfStatement(ParsedAttributes &Attr);
+  StmtResult ParseSwitchStatement(ParsedAttributes &Attr);
+  StmtResult ParseWhileStatement(ParsedAttributes &Attr);
+  StmtResult ParseDoStatement(ParsedAttributes &Attr);
+  StmtResult ParseForStatement(ParsedAttributes &Attr);
+  StmtResult ParseGotoStatement(ParsedAttributes &Attr);
+  StmtResult ParseContinueStatement(ParsedAttributes &Attr);
+  StmtResult ParseBreakStatement(ParsedAttributes &Attr);
+  StmtResult ParseReturnStatement(ParsedAttributes &Attr);
   StmtResult ParseAsmStatement(bool &msAsm);
   StmtResult FuzzyParseMicrosoftAsmStatement(SourceLocation AsmLoc);
   bool ParseAsmOperandsOpt(llvm::SmallVectorImpl<IdentifierInfo *> &Names,
@@ -1218,7 +1229,7 @@ private:
   //===--------------------------------------------------------------------===//
   // C++ 6: Statements and Blocks
 
-  StmtResult ParseCXXTryBlock(AttributeList *Attr);
+  StmtResult ParseCXXTryBlock(ParsedAttributes &Attr);
   StmtResult ParseCXXTryBlockCommon(SourceLocation TryLoc);
   StmtResult ParseCXXCatchBlock();
 
@@ -1245,11 +1256,11 @@ private:
 
   DeclGroupPtrTy ParseDeclaration(StmtVector &Stmts,
                                   unsigned Context, SourceLocation &DeclEnd,
-                                  CXX0XAttributeList Attr);
+                                  ParsedAttributesWithRange &attrs);
   DeclGroupPtrTy ParseSimpleDeclaration(StmtVector &Stmts,
                                         unsigned Context,
                                         SourceLocation &DeclEnd,
-                                        AttributeList *Attr,
+                                        ParsedAttributes &attrs,
                                         bool RequireSemi);
   DeclGroupPtrTy ParseDeclGroup(ParsingDeclSpec &DS, unsigned Context,
                                 bool AllowFunctionDefinitions,
@@ -1258,6 +1269,12 @@ private:
                const ParsedTemplateInfo &TemplateInfo = ParsedTemplateInfo());
   Decl *ParseFunctionStatementBody(Decl *Decl);
   Decl *ParseFunctionTryBlock(Decl *Decl);
+
+  /// \brief When in code-completion, skip parsing of the function/method body
+  /// unless the body contains the code-completion point.
+  ///
+  /// \returns true if the function body was skipped.
+  bool trySkippingFunctionBodyForCodeCompletion();
 
   bool ParseImplicitInt(DeclSpec &DS, CXXScopeSpec *SS,
                         const ParsedTemplateInfo &TemplateInfo,
@@ -1278,7 +1295,8 @@ private:
   void ParseObjCTypeQualifierList(ObjCDeclSpec &DS, bool IsParameter);
 
   void ParseEnumSpecifier(SourceLocation TagLoc, DeclSpec &DS,
-                const ParsedTemplateInfo &TemplateInfo = ParsedTemplateInfo(),                          AccessSpecifier AS = AS_none);
+                const ParsedTemplateInfo &TemplateInfo = ParsedTemplateInfo(),
+                AccessSpecifier AS = AS_none);
   void ParseEnumBody(SourceLocation StartLoc, Decl *TagDecl);
   void ParseStructUnionBody(SourceLocation StartLoc, unsigned TagType,
                             Decl *TagDecl);
@@ -1446,20 +1464,78 @@ private:
   TPResult TryParseFunctionDeclarator();
   TPResult TryParseBracketDeclarator();
 
-  TypeResult ParseTypeName(SourceRange *Range = 0);
+  TypeResult ParseTypeName(SourceRange *Range = 0,
+                           Declarator::TheContext Context
+                                                 = Declarator::TypeNameContext);
   void ParseBlockId();
-  // EndLoc, if non-NULL, is filled with the location of the last token of
-  // the attribute list.
-  CXX0XAttributeList ParseCXX0XAttributes(SourceLocation *EndLoc = 0);
-  void ParseMicrosoftAttributes();
-  AttributeList *ParseGNUAttributes(SourceLocation *EndLoc = 0);
-  AttributeList *ParseMicrosoftDeclSpec(AttributeList* CurrAttr = 0);
-  AttributeList *ParseMicrosoftTypeAttributes(AttributeList* CurrAttr = 0);
-  AttributeList *ParseBorlandTypeAttributes(AttributeList* CurrAttr = 0);
+
+  void ProhibitAttributes(ParsedAttributesWithRange &attrs) {
+    if (!attrs.Range.isValid()) return;
+    DiagnoseProhibitedAttributes(attrs);
+  }
+  void DiagnoseProhibitedAttributes(ParsedAttributesWithRange &attrs);
+
+  void MaybeParseGNUAttributes(Declarator &D) {
+    if (Tok.is(tok::kw___attribute)) {
+      ParsedAttributes attrs;
+      SourceLocation endLoc;
+      ParseGNUAttributes(attrs, &endLoc);
+      D.addAttributes(attrs.getList(), endLoc);
+    }
+  }
+  void MaybeParseGNUAttributes(ParsedAttributes &attrs,
+                               SourceLocation *endLoc = 0) {
+    if (Tok.is(tok::kw___attribute))
+      ParseGNUAttributes(attrs, endLoc);
+  }
+  void ParseGNUAttributes(ParsedAttributes &attrs,
+                          SourceLocation *endLoc = 0);
+
+  void MaybeParseCXX0XAttributes(Declarator &D) {
+    if (getLang().CPlusPlus0x && isCXX0XAttributeSpecifier()) {
+      ParsedAttributesWithRange attrs;
+      SourceLocation endLoc;
+      ParseCXX0XAttributes(attrs, &endLoc);
+      D.addAttributes(attrs.getList(), endLoc);
+    }
+  }
+  void MaybeParseCXX0XAttributes(ParsedAttributes &attrs,
+                                 SourceLocation *endLoc = 0) {
+    if (getLang().CPlusPlus0x && isCXX0XAttributeSpecifier()) {
+      ParsedAttributesWithRange attrsWithRange;
+      ParseCXX0XAttributes(attrsWithRange, endLoc);
+      attrs.append(attrsWithRange.getList());
+    }
+  }
+  void MaybeParseCXX0XAttributes(ParsedAttributesWithRange &attrs,
+                                 SourceLocation *endLoc = 0) {
+    if (getLang().CPlusPlus0x && isCXX0XAttributeSpecifier())
+      ParseCXX0XAttributes(attrs, endLoc);
+  }
+  void ParseCXX0XAttributes(ParsedAttributesWithRange &attrs,
+                            SourceLocation *EndLoc = 0);
+
+  void MaybeParseMicrosoftAttributes(ParsedAttributes &attrs,
+                                     SourceLocation *endLoc = 0) {
+    if (getLang().Microsoft && Tok.is(tok::l_square))
+      ParseMicrosoftAttributes(attrs, endLoc);
+  }
+  void ParseMicrosoftAttributes(ParsedAttributes &attrs,
+                                SourceLocation *endLoc = 0);
+  void ParseMicrosoftDeclSpec(ParsedAttributes &attrs);
+  void ParseMicrosoftTypeAttributes(ParsedAttributes &attrs);
+  void ParseBorlandTypeAttributes(ParsedAttributes &attrs);
+
   void ParseTypeofSpecifier(DeclSpec &DS);
   void ParseDecltypeSpecifier(DeclSpec &DS);
   
   ExprResult ParseCXX0XAlignArgument(SourceLocation Start);
+
+  VirtSpecifiers::Specifier isCXX0XVirtSpecifier() const;
+  void ParseOptionalCXX0XVirtSpecifierSeq(VirtSpecifiers &VS);
+
+  ClassVirtSpecifiers::Specifier isCXX0XClassVirtSpecifier() const;
+  void ParseOptionalCXX0XClassVirtSpecifierSeq(ClassVirtSpecifiers &CVS);
 
   /// DeclaratorScopeObj - RAII object used in Parser::ParseDirectDeclarator to
   /// enter a new C++ declarator scope and exit it when the function is
@@ -1500,12 +1576,13 @@ private:
   typedef void (Parser::*DirectDeclParseFunction)(Declarator&);
   void ParseDeclaratorInternal(Declarator &D,
                                DirectDeclParseFunction DirectDeclParser);
+
   void ParseTypeQualifierListOpt(DeclSpec &DS, bool GNUAttributesAllowed = true,
                                  bool CXX0XAttributesAllowed = true);
   void ParseDirectDeclarator(Declarator &D);
   void ParseParenDeclarator(Declarator &D);
   void ParseFunctionDeclarator(SourceLocation LParenLoc, Declarator &D,
-                               AttributeList *AttrList = 0,
+                               ParsedAttributes &attrs,
                                bool RequiresArg = false);
   void ParseFunctionDeclaratorIdentifierList(SourceLocation LParenLoc,
                                              IdentifierInfo *FirstIdent,
@@ -1525,10 +1602,11 @@ private:
   Decl *ParseUsingDirectiveOrDeclaration(unsigned Context,
                                          const ParsedTemplateInfo &TemplateInfo,
                                          SourceLocation &DeclEnd,
-                                         CXX0XAttributeList Attrs);
+                                         ParsedAttributesWithRange &attrs);
   Decl *ParseUsingDirective(unsigned Context,
                             SourceLocation UsingLoc,
-                            SourceLocation &DeclEnd, AttributeList *Attr);
+                            SourceLocation &DeclEnd,
+                            ParsedAttributes &attrs);
   Decl *ParseUsingDeclaration(unsigned Context,
                               const ParsedTemplateInfo &TemplateInfo,
                               SourceLocation UsingLoc,
@@ -1636,6 +1714,7 @@ private:
   //===--------------------------------------------------------------------===//
   // GNU G++: Type Traits [Type-Traits.html in the GCC manual]
   ExprResult ParseUnaryTypeTrait();
+  ExprResult ParseBinaryTypeTrait();
 
   //===--------------------------------------------------------------------===//
   // Preprocessor code-completion pass-through

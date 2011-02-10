@@ -23,7 +23,7 @@ def ContinueStmt : Stmt;
 def BreakStmt : Stmt;
 def ReturnStmt : Stmt;
 def DeclStmt  : Stmt;
-def SwitchCase : Stmt;
+def SwitchCase : Stmt<1>;
 def CaseStmt : DStmt<SwitchCase>;
 def DefaultStmt : DStmt<SwitchCase>;
 
@@ -76,7 +76,6 @@ def VAArgExpr : DStmt<Expr>;
 // GNU Extensions.
 def AddrLabelExpr : DStmt<Expr>;
 def StmtExpr : DStmt<Expr>;
-def TypesCompatibleExpr : DStmt<Expr>;
 def ChooseExpr : DStmt<Expr>;
 def GNUNullExpr : DStmt<Expr>;
 
@@ -100,10 +99,11 @@ def CXXNewExpr : DStmt<Expr>;
 def CXXDeleteExpr : DStmt<Expr>;
 def CXXPseudoDestructorExpr : DStmt<Expr>;
 def UnaryTypeTraitExpr : DStmt<Expr>;
+def BinaryTypeTraitExpr : DStmt<Expr>;
 def DependentScopeDeclRefExpr : DStmt<Expr>;
 def CXXConstructExpr : DStmt<Expr>;
 def CXXBindTemporaryExpr : DStmt<Expr>;
-def CXXExprWithTemporaries : DStmt<Expr>;
+def ExprWithCleanups : DStmt<Expr>;
 def CXXTemporaryObjectExpr : DStmt<CXXConstructExpr>;
 def CXXUnresolvedConstructExpr : DStmt<Expr>;
 def CXXDependentScopeMemberExpr : DStmt<Expr>;
@@ -111,6 +111,9 @@ def OverloadExpr : DStmt<Expr, 1>;
 def UnresolvedLookupExpr : DStmt<OverloadExpr>;
 def UnresolvedMemberExpr : DStmt<OverloadExpr>;
 def CXXNoexceptExpr : DStmt<Expr>;
+def PackExpansionExpr : DStmt<Expr>;
+def SizeOfPackExpr : DStmt<Expr>;
+def SubstNonTypeTemplateParmPackExpr : DStmt<Expr>;
 
 // Obj-C Expressions.
 def ObjCStringLiteral : DStmt<Expr>;
@@ -121,6 +124,9 @@ def ObjCProtocolExpr : DStmt<Expr>;
 def ObjCIvarRefExpr : DStmt<Expr>;
 def ObjCPropertyRefExpr : DStmt<Expr>;
 def ObjCIsaExpr : DStmt<Expr>;
+
+// CUDA Expressions.
+def CUDAKernelCallExpr : DStmt<CallExpr>;
 
 // Clang Extensions.
 def ShuffleVectorExpr : DStmt<Expr>;

@@ -110,8 +110,20 @@ void Decl::add(Kind k) {
 bool Decl::isTemplateParameterPack() const {
   if (const TemplateTypeParmDecl *TTP = dyn_cast<TemplateTypeParmDecl>(this))
     return TTP->isParameterPack();
-
+  if (const NonTypeTemplateParmDecl *NTTP
+                                = dyn_cast<NonTypeTemplateParmDecl>(this))
+    return NTTP->isParameterPack();
+  if (const TemplateTemplateParmDecl *TTP
+                                    = dyn_cast<TemplateTemplateParmDecl>(this))
+    return TTP->isParameterPack();
   return false;
+}
+
+bool Decl::isParameterPack() const {
+  if (const ParmVarDecl *Parm = dyn_cast<ParmVarDecl>(this))
+    return Parm->isParameterPack();
+  
+  return isTemplateParameterPack();
 }
 
 bool Decl::isFunctionOrFunctionTemplate() const {
@@ -335,38 +347,6 @@ void Decl::dropAttrs() {
 
   HasAttrs = false;
   getASTContext().eraseDeclAttrs(this);
-}
-
-void Decl::addAttr(Attr *A) {
-  if (NamedDecl *ND = dyn_cast<NamedDecl>(this))
-    if (VisibilityAttr *Visibility = dyn_cast<VisibilityAttr>(A)) {
-      bool ClearVisibility = true;
-      if (VarDecl *VD = dyn_cast<VarDecl>(this)) {
-        if (VD->getPreviousDeclaration()) {
-          VisibilityAttr *PrevVisibility 
-            = VD->getPreviousDeclaration()->getAttr<VisibilityAttr>();
-          if  (PrevVisibility &&
-               PrevVisibility->getVisibility() == Visibility->getVisibility())
-            ClearVisibility = false;
-        }
-      } else if (FunctionDecl *FD = dyn_cast<FunctionDecl>(this)) {
-        if (FD->getPreviousDeclaration()) {
-          VisibilityAttr *PrevVisibility 
-            = FD->getPreviousDeclaration()->getAttr<VisibilityAttr>();
-          if  (PrevVisibility &&
-               PrevVisibility->getVisibility() == Visibility->getVisibility())
-            ClearVisibility = false;
-        }
-      }
-      
-      if (ClearVisibility)
-        ND->ClearLinkageAndVisibilityCache();
-    }
-  
-  if (hasAttrs())
-    getAttrs().push_back(A);
-  else
-    setAttrs(AttrVec(1, A));
 }
 
 const AttrVec &Decl::getAttrs() const {

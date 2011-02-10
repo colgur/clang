@@ -15,6 +15,7 @@
 #include "clang/AST/StmtVisitor.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
+#include "clang/AST/DeclTemplate.h"
 #include "clang/AST/PrettyPrinter.h"
 #include "llvm/Support/Format.h"
 #include "clang/AST/Expr.h"
@@ -64,6 +65,7 @@ namespace  {
     void PrintRawDeclStmt(DeclStmt *S);
     void PrintRawIfStmt(IfStmt *If);
     void PrintRawCXXCatchStmt(CXXCatchStmt *Catch);
+    void PrintCallArgs(CallExpr *E);
 
     void PrintExpr(Expr *E) {
       if (E)
@@ -216,10 +218,6 @@ void StmtPrinter::VisitSwitchStmt(SwitchStmt *Node) {
     OS << "\n";
     PrintStmt(Node->getBody());
   }
-}
-
-void StmtPrinter::VisitSwitchCase(SwitchCase*) {
-  assert(0 && "SwitchCase is an abstract class");
 }
 
 void StmtPrinter::VisitWhileStmt(WhileStmt *Node) {
@@ -480,7 +478,8 @@ void StmtPrinter::VisitDeclRefExpr(DeclRefExpr *Node) {
 
 void StmtPrinter::VisitDependentScopeDeclRefExpr(
                                            DependentScopeDeclRefExpr *Node) {
-  Node->getQualifier()->print(OS, Policy);
+  if (NestedNameSpecifier *Qualifier = Node->getQualifier())
+    Qualifier->print(OS, Policy);
   OS << Node->getNameInfo();
   if (Node->hasExplicitTemplateArgs())
     OS << TemplateSpecializationType::PrintTemplateArgumentList(
@@ -723,9 +722,7 @@ void StmtPrinter::VisitArraySubscriptExpr(ArraySubscriptExpr *Node) {
   OS << "]";
 }
 
-void StmtPrinter::VisitCallExpr(CallExpr *Call) {
-  PrintExpr(Call->getCallee());
-  OS << "(";
+void StmtPrinter::PrintCallArgs(CallExpr *Call) {
   for (unsigned i = 0, e = Call->getNumArgs(); i != e; ++i) {
     if (isa<CXXDefaultArgExpr>(Call->getArg(i))) {
       // Don't print any defaulted arguments
@@ -735,6 +732,12 @@ void StmtPrinter::VisitCallExpr(CallExpr *Call) {
     if (i) OS << ", ";
     PrintExpr(Call->getArg(i));
   }
+}
+
+void StmtPrinter::VisitCallExpr(CallExpr *Call) {
+  PrintExpr(Call->getCallee());
+  OS << "(";
+  PrintCallArgs(Call);
   OS << ")";
 }
 void StmtPrinter::VisitMemberExpr(MemberExpr *Node) {
@@ -812,12 +815,6 @@ void StmtPrinter::VisitStmtExpr(StmtExpr *E) {
   OS << "(";
   PrintRawCompoundStmt(E->getSubStmt());
   OS << ")";
-}
-
-void StmtPrinter::VisitTypesCompatibleExpr(TypesCompatibleExpr *Node) {
-  OS << "__builtin_types_compatible_p(";
-  OS << Node->getArgType1().getAsString(Policy) << ",";
-  OS << Node->getArgType2().getAsString(Policy) << ")";
 }
 
 void StmtPrinter::VisitChooseExpr(ChooseExpr *Node) {
@@ -962,6 +959,15 @@ void StmtPrinter::VisitCXXOperatorCallExpr(CXXOperatorCallExpr *Node) {
 
 void StmtPrinter::VisitCXXMemberCallExpr(CXXMemberCallExpr *Node) {
   VisitCallExpr(cast<CallExpr>(Node));
+}
+
+void StmtPrinter::VisitCUDAKernelCallExpr(CUDAKernelCallExpr *Node) {
+  PrintExpr(Node->getCallee());
+  OS << "<<<";
+  PrintCallArgs(Node->getConfig());
+  OS << ">>>(";
+  PrintCallArgs(Node);
+  OS << ")";
 }
 
 void StmtPrinter::VisitCXXNamedCastExpr(CXXNamedCastExpr *Node) {
@@ -1132,17 +1138,18 @@ void StmtPrinter::VisitCXXPseudoDestructorExpr(CXXPseudoDestructorExpr *E) {
 }
 
 void StmtPrinter::VisitCXXConstructExpr(CXXConstructExpr *E) {
-  // FIXME. For now we just print a trivial constructor call expression,
-  // constructing its first argument object.
-  if (E->getNumArgs() == 1) {
-    CXXConstructorDecl *CD = E->getConstructor();
-    if (CD->isTrivial())
-      PrintExpr(E->getArg(0));
+  for (unsigned i = 0, e = E->getNumArgs(); i != e; ++i) {
+    if (isa<CXXDefaultArgExpr>(E->getArg(i))) {
+      // Don't print any defaulted arguments
+      break;
+    }
+
+    if (i) OS << ", ";
+    PrintExpr(E->getArg(i));
   }
-  // Nothing to print.
 }
 
-void StmtPrinter::VisitCXXExprWithTemporaries(CXXExprWithTemporaries *E) {
+void StmtPrinter::VisitExprWithCleanups(ExprWithCleanups *E) {
   // Just forward to the sub expression.
   PrintExpr(E->getSubExpr());
 }
@@ -1206,7 +1213,7 @@ void StmtPrinter::VisitUnresolvedMemberExpr(UnresolvedMemberExpr *Node) {
 
 static const char *getTypeTraitName(UnaryTypeTrait UTT) {
   switch (UTT) {
-  default: assert(false && "Unknown type trait");
+  default: llvm_unreachable("Unknown unary type trait");
   case UTT_HasNothrowAssign:      return "__has_nothrow_assign";
   case UTT_HasNothrowCopy:        return "__has_nothrow_copy";
   case UTT_HasNothrowConstructor: return "__has_nothrow_constructor";
@@ -1223,6 +1230,16 @@ static const char *getTypeTraitName(UnaryTypeTrait UTT) {
   case UTT_IsPolymorphic:         return "__is_polymorphic";
   case UTT_IsUnion:               return "__is_union";
   }
+  return "";
+}
+
+static const char *getTypeTraitName(BinaryTypeTrait BTT) {
+  switch (BTT) {
+  case BTT_IsBaseOf:         return "__is_base_of";
+  case BTT_TypeCompatible:   return "__builtin_types_compatible_p";
+  case BTT_IsConvertibleTo:  return "__is_convertible_to";
+  }
+  return "";
 }
 
 void StmtPrinter::VisitUnaryTypeTraitExpr(UnaryTypeTraitExpr *E) {
@@ -1230,10 +1247,30 @@ void StmtPrinter::VisitUnaryTypeTraitExpr(UnaryTypeTraitExpr *E) {
      << E->getQueriedType().getAsString(Policy) << ")";
 }
 
+void StmtPrinter::VisitBinaryTypeTraitExpr(BinaryTypeTraitExpr *E) {
+  OS << getTypeTraitName(E->getTrait()) << "("
+     << E->getLhsType().getAsString(Policy) << ","
+     << E->getRhsType().getAsString(Policy) << ")";
+}
+
 void StmtPrinter::VisitCXXNoexceptExpr(CXXNoexceptExpr *E) {
   OS << "noexcept(";
   PrintExpr(E->getOperand());
   OS << ")";
+}
+
+void StmtPrinter::VisitPackExpansionExpr(PackExpansionExpr *E) {
+  PrintExpr(E->getPattern());
+  OS << "...";
+}
+
+void StmtPrinter::VisitSizeOfPackExpr(SizeOfPackExpr *E) {
+  OS << "sizeof...(" << E->getPack()->getNameAsString() << ")";
+}
+
+void StmtPrinter::VisitSubstNonTypeTemplateParmPackExpr(
+                                       SubstNonTypeTemplateParmPackExpr *Node) {
+  OS << Node->getParameterPack()->getNameAsString();
 }
 
 // Obj-C

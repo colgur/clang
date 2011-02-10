@@ -20,6 +20,7 @@
 #include "clang/Basic/Specifiers.h"
 
 namespace clang {
+  class ASTContext;
   class ParmVarDecl;
   class TypeSourceInfo;
   class UnqualTypeLoc;
@@ -38,7 +39,7 @@ class TypeLoc {
 protected:
   // The correctness of this relies on the property that, for Type *Ty,
   //   QualType(Ty, 0).getAsOpaquePtr() == (void*) Ty
-  void *Ty;
+  const void *Ty;
   void *Data;
 
 public:
@@ -56,7 +57,7 @@ public:
   TypeLoc() : Ty(0), Data(0) { }
   TypeLoc(QualType ty, void *opaqueData)
     : Ty(ty.getAsOpaquePtr()), Data(opaqueData) { }
-  TypeLoc(Type *ty, void *opaqueData)
+  TypeLoc(const Type *ty, void *opaqueData)
     : Ty(ty), Data(opaqueData) { }
 
   TypeLocClass getTypeLocClass() const {
@@ -76,7 +77,7 @@ public:
     return QualType::getFromOpaquePtr(Ty);
   }
 
-  Type *getTypePtr() const {
+  const Type *getTypePtr() const {
     return QualType::getFromOpaquePtr(Ty).getTypePtr();
   }
 
@@ -115,19 +116,36 @@ public:
   /// \brief Skips past any qualifiers, if this is qualified.
   UnqualTypeLoc getUnqualifiedLoc() const; // implemented in this header
 
+  TypeLoc IgnoreParens() const {
+    if (isa<ParenTypeLoc>(this))
+      return IgnoreParensImpl(*this);
+    return *this;
+  }
+
   /// \brief Initializes this to state that every location in this
   /// type is the given location.
   ///
   /// This method exists to provide a simple transition for code that
   /// relies on location-less types.
-  void initialize(SourceLocation Loc) const {
-    initializeImpl(*this, Loc);
+  void initialize(ASTContext &Context, SourceLocation Loc) const {
+    initializeImpl(Context, *this, Loc);
   }
 
   /// \brief Initializes this by copying its information from another
   /// TypeLoc of the same type.
   void initializeFullCopy(TypeLoc Other) const {
-    initializeFullCopyImpl(*this, Other);
+    assert(getType() == Other.getType());
+    size_t Size = getFullDataSize();
+    memcpy(getOpaqueData(), Other.getOpaqueData(), Size);
+  }
+
+  /// \brief Initializes this by copying its information from another
+  /// TypeLoc of the same type.  The given size must be the full data
+  /// size.
+  void initializeFullCopy(TypeLoc Other, unsigned Size) const {
+    assert(getType() == Other.getType());
+    assert(getFullDataSize() == Size);
+    memcpy(getOpaqueData(), Other.getOpaqueData(), Size);
   }
 
   friend bool operator==(const TypeLoc &LHS, const TypeLoc &RHS) {
@@ -141,9 +159,9 @@ public:
   static bool classof(const TypeLoc *TL) { return true; }
 
 private:
-  static void initializeImpl(TypeLoc TL, SourceLocation Loc);
-  static void initializeFullCopyImpl(TypeLoc TL, TypeLoc Other);
+  static void initializeImpl(ASTContext &Context, TypeLoc TL, SourceLocation Loc);
   static TypeLoc getNextTypeLocImpl(TypeLoc TL);
+  static TypeLoc IgnoreParensImpl(TypeLoc TL);
   static SourceRange getLocalSourceRangeImpl(TypeLoc TL);
 };
 
@@ -157,10 +175,10 @@ inline TypeLoc TypeSourceInfo::getTypeLoc() const {
 class UnqualTypeLoc : public TypeLoc {
 public:
   UnqualTypeLoc() {}
-  UnqualTypeLoc(Type *Ty, void *Data) : TypeLoc(Ty, Data) {}
+  UnqualTypeLoc(const Type *Ty, void *Data) : TypeLoc(Ty, Data) {}
 
-  Type *getTypePtr() const {
-    return reinterpret_cast<Type*>(Ty);
+  const Type *getTypePtr() const {
+    return reinterpret_cast<const Type*>(Ty);
   }
 
   TypeLocClass getTypeLocClass() const {
@@ -190,7 +208,7 @@ public:
 
   /// Initializes the local data of this type source info block to
   /// provide no information.
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     // do nothing
   }
 
@@ -289,7 +307,7 @@ public:
     return getNextTypeLoc(asDerived()->getInnerType());
   }
 
-  TypeClass *getTypePtr() const {
+  const TypeClass *getTypePtr() const {
     return cast<TypeClass>(Base::getTypePtr());
   }
 
@@ -362,7 +380,7 @@ public:
     return true;
   }
 
-  TypeClass *getTypePtr() const {
+  const TypeClass *getTypePtr() const {
     return cast<TypeClass>(Base::getTypePtr());
   }
 };
@@ -390,7 +408,7 @@ public:
   SourceRange getLocalSourceRange() const {
     return SourceRange(getNameLoc(), getNameLoc());
   }
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setNameLoc(Loc);
   }
 
@@ -491,7 +509,7 @@ public:
       getWrittenBuiltinSpecs().ModeAttr = written;
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setBuiltinLoc(Loc);
     if (needsExtraLocalData()) {
       WrittenBuiltinSpecs &wbs = getWrittenBuiltinSpecs();
@@ -575,6 +593,137 @@ class SubstTemplateTypeParmTypeLoc :
                                      SubstTemplateTypeParmType> {
 };
 
+  /// \brief Wrapper for substituted template type parameters.
+class SubstTemplateTypeParmPackTypeLoc :
+    public InheritingConcreteTypeLoc<TypeSpecTypeLoc,
+                                     SubstTemplateTypeParmPackTypeLoc,
+                                     SubstTemplateTypeParmPackType> {
+};
+
+struct AttributedLocInfo {
+  union {
+    Expr *ExprOperand;
+
+    /// A raw SourceLocation.
+    unsigned EnumOperandLoc;
+  };
+
+  SourceRange OperandParens;
+
+  SourceLocation AttrLoc;
+};
+
+/// \brief Type source information for an attributed type.
+class AttributedTypeLoc : public ConcreteTypeLoc<UnqualTypeLoc,
+                                                 AttributedTypeLoc,
+                                                 AttributedType,
+                                                 AttributedLocInfo> {
+public:
+  AttributedType::Kind getAttrKind() const {
+    return getTypePtr()->getAttrKind();
+  }
+
+  bool hasAttrExprOperand() const {
+    return (getAttrKind() >= AttributedType::FirstExprOperandKind &&
+            getAttrKind() <= AttributedType::LastExprOperandKind);
+  }
+
+  bool hasAttrEnumOperand() const {
+    return (getAttrKind() >= AttributedType::FirstEnumOperandKind &&
+            getAttrKind() <= AttributedType::LastEnumOperandKind);
+  }
+
+  bool hasAttrOperand() const {
+    return hasAttrExprOperand() || hasAttrEnumOperand();
+  }
+
+  /// The modified type, which is generally canonically different from
+  /// the attribute type.
+  ///    int main(int, char**) __attribute__((noreturn))
+  ///    ~~~     ~~~~~~~~~~~~~
+  TypeLoc getModifiedLoc() const {
+    return getInnerTypeLoc();
+  }
+
+  /// The location of the attribute name, i.e.
+  ///    __attribute__((regparm(1000)))
+  ///                   ^~~~~~~
+  SourceLocation getAttrNameLoc() const {
+    return getLocalData()->AttrLoc;
+  }
+  void setAttrNameLoc(SourceLocation loc) {
+    getLocalData()->AttrLoc = loc;
+  }
+
+  /// The attribute's expression operand, if it has one.
+  ///    void *cur_thread __attribute__((address_space(21)))
+  ///                                                  ^~
+  Expr *getAttrExprOperand() const {
+    assert(hasAttrExprOperand());
+    return getLocalData()->ExprOperand;
+  }
+  void setAttrExprOperand(Expr *e) {
+    assert(hasAttrExprOperand());
+    getLocalData()->ExprOperand = e;
+  }
+
+  /// The location of the attribute's enumerated operand, if it has one.
+  ///    void * __attribute__((objc_gc(weak)))
+  ///                                  ^~~~
+  SourceLocation getAttrEnumOperandLoc() const {
+    assert(hasAttrEnumOperand());
+    return SourceLocation::getFromRawEncoding(getLocalData()->EnumOperandLoc);
+  }
+  void setAttrEnumOperandLoc(SourceLocation loc) {
+    assert(hasAttrEnumOperand());
+    getLocalData()->EnumOperandLoc = loc.getRawEncoding();
+  }
+
+  /// The location of the parentheses around the operand, if there is
+  /// an operand.
+  ///    void * __attribute__((objc_gc(weak)))
+  ///                                 ^    ^
+  SourceRange getAttrOperandParensRange() const {
+    assert(hasAttrOperand());
+    return getLocalData()->OperandParens;
+  }
+  void setAttrOperandParensRange(SourceRange range) {
+    assert(hasAttrOperand());
+    getLocalData()->OperandParens = range;
+  }
+
+  SourceRange getLocalSourceRange() const {
+    // Note that this does *not* include the range of the attribute
+    // enclosure, e.g.:
+    //    __attribute__((foo(bar)))
+    //    ^~~~~~~~~~~~~~~        ~~
+    // or
+    //    [[foo(bar)]]
+    //    ^~        ~~
+    // That enclosure doesn't necessarily belong to a single attribute
+    // anyway.
+    SourceRange range(getAttrNameLoc());
+    if (hasAttrOperand())
+      range.setEnd(getAttrOperandParensRange().getEnd());
+    return range;
+  }
+
+  void initializeLocal(ASTContext &Context, SourceLocation loc) {
+    setAttrNameLoc(loc);
+    if (hasAttrExprOperand()) {
+      setAttrOperandParensRange(SourceRange(loc));
+      setAttrExprOperand(0);
+    } else if (hasAttrEnumOperand()) {
+      setAttrOperandParensRange(SourceRange(loc));
+      setAttrEnumOperandLoc(loc);
+    }
+  }
+
+  QualType getInnerType() const {
+    return getTypePtr()->getModifiedType();
+  }
+};
+
 
 struct ObjCProtocolListLocInfo {
   SourceLocation LAngleLoc;
@@ -645,7 +794,7 @@ public:
     return SourceRange(getLAngleLoc(), getRAngleLoc());
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setHasBaseTypeAsWritten(true);
     setLAngleLoc(Loc);
     setRAngleLoc(Loc);
@@ -689,8 +838,48 @@ public:
     return SourceRange(getNameLoc());
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setNameLoc(Loc);
+  }
+};
+
+struct ParenLocInfo {
+  SourceLocation LParenLoc;
+  SourceLocation RParenLoc;
+};
+
+class ParenTypeLoc
+  : public ConcreteTypeLoc<UnqualTypeLoc, ParenTypeLoc, ParenType,
+                           ParenLocInfo> {
+public:
+  SourceLocation getLParenLoc() const {
+    return this->getLocalData()->LParenLoc;
+  }
+  SourceLocation getRParenLoc() const {
+    return this->getLocalData()->RParenLoc;
+  }
+  void setLParenLoc(SourceLocation Loc) {
+    this->getLocalData()->LParenLoc = Loc;
+  }
+  void setRParenLoc(SourceLocation Loc) {
+    this->getLocalData()->RParenLoc = Loc;
+  }
+
+  SourceRange getLocalSourceRange() const {
+    return SourceRange(getLParenLoc(), getRParenLoc());
+  }
+
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
+    setLParenLoc(Loc);
+    setRParenLoc(Loc);
+  }
+
+  TypeLoc getInnerLoc() const {
+    return getInnerTypeLoc();
+  }
+
+  QualType getInnerType() const {
+    return this->getTypePtr()->getInnerType();
   }
 };
 
@@ -719,7 +908,7 @@ public:
     return SourceRange(getSigilLoc(), getSigilLoc());
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setSigilLoc(Loc);
   }
 
@@ -827,11 +1016,6 @@ class FunctionTypeLoc : public ConcreteTypeLoc<UnqualTypeLoc,
                                                FunctionTypeLoc,
                                                FunctionType,
                                                FunctionLocInfo> {
-  // ParmVarDecls* are stored after Info, one for each argument.
-  ParmVarDecl **getParmArray() const {
-    return (ParmVarDecl**) getExtraLocalData();
-  }
-
 public:
   SourceLocation getLParenLoc() const {
     return getLocalData()->LParenLoc;
@@ -854,6 +1038,11 @@ public:
     getLocalData()->TrailingReturn = Trailing;
   }
 
+  // ParmVarDecls* are stored after Info, one for each argument.
+  ParmVarDecl **getParmArray() const {
+    return (ParmVarDecl**) getExtraLocalData();
+  }
+
   unsigned getNumArgs() const {
     if (isa<FunctionNoProtoType>(getTypePtr()))
       return 0;
@@ -870,7 +1059,7 @@ public:
     return SourceRange(getLParenLoc(), getRParenLoc());
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setLParenLoc(Loc);
     setRParenLoc(Loc);
     setTrailingReturn(false);
@@ -944,7 +1133,7 @@ public:
     return SourceRange(getLBracketLoc(), getRBracketLoc());
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setLBracketLoc(Loc);
     setRBracketLoc(Loc);
     setSizeExpr(NULL);
@@ -1046,21 +1235,18 @@ public:
     return SourceRange(getTemplateNameLoc(), getRAngleLoc());
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setLAngleLoc(Loc);
     setRAngleLoc(Loc);
     setTemplateNameLoc(Loc);
-    initializeArgLocs(getNumArgs(), getTypePtr()->getArgs(),
+    initializeArgLocs(Context, getNumArgs(), getTypePtr()->getArgs(),
                       getArgInfos(), Loc);
   }
 
-  static void initializeArgLocs(unsigned NumArgs,
+  static void initializeArgLocs(ASTContext &Context, unsigned NumArgs,
                                 const TemplateArgument *Args,
                                 TemplateArgumentLocInfo *ArgInfos,
-                                SourceLocation Loc) {
-    for (unsigned i = 0, e = NumArgs; i != e; ++i)
-      ArgInfos[i] = TemplateArgumentLocInfo();
-  }
+                                SourceLocation Loc);
 
   unsigned getExtraLocalDataSize() const {
     return getNumArgs() * sizeof(TemplateArgumentLocInfo);
@@ -1155,7 +1341,7 @@ public:
     return SourceRange(getTypeofLoc(), getRParenLoc());
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setTypeofLoc(Loc);
     setLParenLoc(Loc);
     setRParenLoc(Loc);
@@ -1229,7 +1415,7 @@ public:
       return getQualifierRange();
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setKeywordLoc(Loc);
     setQualifierRange(SourceRange(Loc));
   }
@@ -1294,7 +1480,7 @@ public:
     memcpy(Data, Loc.Data, size);
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setKeywordLoc(Loc);
     setQualifierRange(SourceRange(Loc));
     setNameLoc(Loc);
@@ -1378,13 +1564,13 @@ public:
     memcpy(Data, Loc.Data, size);
   }
 
-  void initializeLocal(SourceLocation Loc) {
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
     setKeywordLoc(Loc);
     setQualifierRange(SourceRange(Loc));
     setNameLoc(Loc);
     setLAngleLoc(Loc);
     setRAngleLoc(Loc);
-    TemplateSpecializationTypeLoc::initializeArgLocs(getNumArgs(),
+    TemplateSpecializationTypeLoc::initializeArgLocs(Context, getNumArgs(),
                                                      getTypePtr()->getArgs(),
                                                      getArgInfos(), Loc);
   }
@@ -1396,6 +1582,40 @@ public:
 private:
   TemplateArgumentLocInfo *getArgInfos() const {
     return static_cast<TemplateArgumentLocInfo*>(getExtraLocalData());
+  }
+};
+
+
+struct PackExpansionTypeLocInfo {
+  SourceLocation EllipsisLoc;
+};
+
+class PackExpansionTypeLoc
+  : public ConcreteTypeLoc<UnqualTypeLoc, PackExpansionTypeLoc, 
+                           PackExpansionType, PackExpansionTypeLocInfo> {
+public:
+  SourceLocation getEllipsisLoc() const {
+    return this->getLocalData()->EllipsisLoc;
+  }
+
+  void setEllipsisLoc(SourceLocation Loc) {
+    this->getLocalData()->EllipsisLoc = Loc;
+  }
+
+  SourceRange getLocalSourceRange() const {
+    return SourceRange(getEllipsisLoc(), getEllipsisLoc());
+  }
+
+  void initializeLocal(ASTContext &Context, SourceLocation Loc) {
+    setEllipsisLoc(Loc);
+  }
+
+  TypeLoc getPatternLoc() const {
+    return getInnerTypeLoc();
+  }
+
+  QualType getInnerType() const {
+    return this->getTypePtr()->getPattern();
   }
 };
 

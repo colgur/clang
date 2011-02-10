@@ -15,6 +15,7 @@
 #include "clang/Lex/HeaderMap.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/IdentifierTable.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/ADT/SmallString.h"
 #include <cstdio>
@@ -32,12 +33,15 @@ HeaderFileInfo::getControllingMacro(ExternalIdentifierLookup *External) {
   return ControllingMacro;
 }
 
+ExternalHeaderFileInfoSource::~ExternalHeaderFileInfoSource() {}
+
 HeaderSearch::HeaderSearch(FileManager &FM)
     : FileMgr(FM), FrameworkMap(64) {
   SystemDirIdx = 0;
   NoCurDirSearch = false;
 
   ExternalLookup = 0;
+  ExternalSource = 0;
   NumIncluded = 0;
   NumMultiIncludeFileOptzn = 0;
   NumFrameworkLookups = NumSubFrameworkLookups = 0;
@@ -170,8 +174,8 @@ const FileEntry *DirectoryLookup::DoFrameworkLookup(llvm::StringRef Filename,
 
     // If the framework dir doesn't exist, we fail.
     // FIXME: It's probably more efficient to query this with FileMgr.getDir.
-    if (!llvm::sys::Path(std::string(FrameworkName.begin(),
-                                     FrameworkName.end())).exists())
+    bool Exists;
+    if (llvm::sys::fs::exists(FrameworkName.str(), Exists) || !Exists)
       return 0;
 
     // Otherwise, if it does, remember that this is the right direntry for this
@@ -211,7 +215,7 @@ const FileEntry *HeaderSearch::LookupFile(llvm::StringRef Filename,
                                           const DirectoryLookup *&CurDir,
                                           const FileEntry *CurFileEnt) {
   // If 'Filename' is absolute, check to see if it exists and no searching.
-  if (llvm::sys::Path::isAbsolute(Filename.begin(), Filename.size())) {
+  if (llvm::sys::path::is_absolute(Filename)) {
     CurDir = 0;
 
     // If this was an #include_next "/absolute/file", fail.
@@ -386,12 +390,19 @@ LookupSubframeworkHeader(llvm::StringRef Filename,
 HeaderFileInfo &HeaderSearch::getFileInfo(const FileEntry *FE) {
   if (FE->getUID() >= FileInfo.size())
     FileInfo.resize(FE->getUID()+1);
-  return FileInfo[FE->getUID()];
+  
+  HeaderFileInfo &HFI = FileInfo[FE->getUID()];
+  if (ExternalSource && !HFI.Resolved) {
+    HFI = ExternalSource->GetHeaderFileInfo(FE);
+    HFI.Resolved = true;
+  }
+  return HFI;
 }
 
 void HeaderSearch::setHeaderFileInfoForUID(HeaderFileInfo HFI, unsigned UID) {
   if (UID >= FileInfo.size())
     FileInfo.resize(UID+1);
+  HFI.Resolved = true;
   FileInfo[UID] = HFI;
 }
 

@@ -29,7 +29,8 @@ class ObjCStringLiteral : public Expr {
   SourceLocation AtLoc;
 public:
   ObjCStringLiteral(StringLiteral *SL, QualType T, SourceLocation L)
-    : Expr(ObjCStringLiteralClass, T, VK_RValue, OK_Ordinary, false, false),
+    : Expr(ObjCStringLiteralClass, T, VK_RValue, OK_Ordinary, false, false,
+           false),
       String(SL), AtLoc(L) {}
   explicit ObjCStringLiteral(EmptyShell Empty)
     : Expr(ObjCStringLiteralClass, Empty) {}
@@ -41,7 +42,7 @@ public:
   SourceLocation getAtLoc() const { return AtLoc; }
   void setAtLoc(SourceLocation L) { AtLoc = L; }
 
-  virtual SourceRange getSourceRange() const {
+  SourceRange getSourceRange() const {
     return SourceRange(AtLoc, String->getLocEnd());
   }
 
@@ -51,8 +52,7 @@ public:
   static bool classof(const ObjCStringLiteral *) { return true; }
 
   // Iterators
-  virtual child_iterator child_begin();
-  virtual child_iterator child_end();
+  child_range children() { return child_range(&String, &String+1); }
 };
 
 /// ObjCEncodeExpr, used for @encode in Objective-C.  @encode has the same type
@@ -66,7 +66,8 @@ public:
                  SourceLocation at, SourceLocation rp)
     : Expr(ObjCEncodeExprClass, T, VK_LValue, OK_Ordinary,
            EncodedType->getType()->isDependentType(),
-           EncodedType->getType()->isDependentType()), 
+           EncodedType->getType()->isDependentType(),
+           EncodedType->getType()->containsUnexpandedParameterPack()), 
       EncodedType(EncodedType), AtLoc(at), RParenLoc(rp) {}
 
   explicit ObjCEncodeExpr(EmptyShell Empty) : Expr(ObjCEncodeExprClass, Empty){}
@@ -84,7 +85,7 @@ public:
     EncodedType = EncType; 
   }
 
-  virtual SourceRange getSourceRange() const {
+  SourceRange getSourceRange() const {
     return SourceRange(AtLoc, RParenLoc);
   }
 
@@ -94,8 +95,7 @@ public:
   static bool classof(const ObjCEncodeExpr *) { return true; }
 
   // Iterators
-  virtual child_iterator child_begin();
-  virtual child_iterator child_end();
+  child_range children() { return child_range(); }
 };
 
 /// ObjCSelectorExpr used for @selector in Objective-C.
@@ -105,7 +105,8 @@ class ObjCSelectorExpr : public Expr {
 public:
   ObjCSelectorExpr(QualType T, Selector selInfo,
                    SourceLocation at, SourceLocation rp)
-  : Expr(ObjCSelectorExprClass, T, VK_RValue, OK_Ordinary, false, false),
+    : Expr(ObjCSelectorExprClass, T, VK_RValue, OK_Ordinary, false, false, 
+           false),
     SelName(selInfo), AtLoc(at), RParenLoc(rp){}
   explicit ObjCSelectorExpr(EmptyShell Empty)
    : Expr(ObjCSelectorExprClass, Empty) {}
@@ -118,7 +119,7 @@ public:
   void setAtLoc(SourceLocation L) { AtLoc = L; }
   void setRParenLoc(SourceLocation L) { RParenLoc = L; }
 
-  virtual SourceRange getSourceRange() const {
+  SourceRange getSourceRange() const {
     return SourceRange(AtLoc, RParenLoc);
   }
 
@@ -131,8 +132,7 @@ public:
   static bool classof(const ObjCSelectorExpr *) { return true; }
 
   // Iterators
-  virtual child_iterator child_begin();
-  virtual child_iterator child_end();
+  child_range children() { return child_range(); }
 };
 
 /// ObjCProtocolExpr used for protocol expression in Objective-C.  This is used
@@ -145,8 +145,9 @@ class ObjCProtocolExpr : public Expr {
 public:
   ObjCProtocolExpr(QualType T, ObjCProtocolDecl *protocol,
                    SourceLocation at, SourceLocation rp)
-  : Expr(ObjCProtocolExprClass, T, VK_RValue, OK_Ordinary, false, false),
-    TheProtocol(protocol), AtLoc(at), RParenLoc(rp) {}
+    : Expr(ObjCProtocolExprClass, T, VK_RValue, OK_Ordinary, false, false,
+           false),
+      TheProtocol(protocol), AtLoc(at), RParenLoc(rp) {}
   explicit ObjCProtocolExpr(EmptyShell Empty)
     : Expr(ObjCProtocolExprClass, Empty) {}
 
@@ -158,7 +159,7 @@ public:
   void setAtLoc(SourceLocation L) { AtLoc = L; }
   void setRParenLoc(SourceLocation L) { RParenLoc = L; }
 
-  virtual SourceRange getSourceRange() const {
+  SourceRange getSourceRange() const {
     return SourceRange(AtLoc, RParenLoc);
   }
 
@@ -168,8 +169,7 @@ public:
   static bool classof(const ObjCProtocolExpr *) { return true; }
 
   // Iterators
-  virtual child_iterator child_begin();
-  virtual child_iterator child_end();
+  child_range children() { return child_range(); }
 };
 
 /// ObjCIvarRefExpr - A reference to an ObjC instance variable.
@@ -185,9 +185,9 @@ public:
                   SourceLocation l, Expr *base,
                   bool arrow = false, bool freeIvar = false) :
     Expr(ObjCIvarRefExprClass, t, VK_LValue, OK_Ordinary,
-         /*TypeDependent=*/false, base->isValueDependent()), D(d),
-         Loc(l), Base(base), IsArrow(arrow),
-         IsFreeIvar(freeIvar) {}
+         /*TypeDependent=*/false, base->isValueDependent(), 
+         base->containsUnexpandedParameterPack()), 
+    D(d), Loc(l), Base(base), IsArrow(arrow), IsFreeIvar(freeIvar) {}
 
   explicit ObjCIvarRefExpr(EmptyShell Empty)
     : Expr(ObjCIvarRefExprClass, Empty) {}
@@ -208,7 +208,7 @@ public:
   SourceLocation getLocation() const { return Loc; }
   void setLocation(SourceLocation L) { Loc = L; }
 
-  virtual SourceRange getSourceRange() const {
+  SourceRange getSourceRange() const {
     return isFreeIvar() ? SourceRange(Loc)
     : SourceRange(getBase()->getLocStart(), Loc);
   }
@@ -219,8 +219,7 @@ public:
   static bool classof(const ObjCIvarRefExpr *) { return true; }
 
   // Iterators
-  virtual child_iterator child_begin();
-  virtual child_iterator child_end();
+  child_range children() { return child_range(&Base, &Base+1); }
 };
 
 /// ObjCPropertyRefExpr - A dot-syntax expression to access an ObjC
@@ -241,14 +240,15 @@ private:
   /// the location of the 'super' keyword.  When it's an interface,
   /// this is that interface.
   SourceLocation ReceiverLoc;
-  llvm::PointerUnion3<Stmt*, Type*, ObjCInterfaceDecl*> Receiver;
+  llvm::PointerUnion3<Stmt*, const Type*, ObjCInterfaceDecl*> Receiver;
   
 public:
   ObjCPropertyRefExpr(ObjCPropertyDecl *PD, QualType t,
                       ExprValueKind VK, ExprObjectKind OK,
                       SourceLocation l, Expr *base)
     : Expr(ObjCPropertyRefExprClass, t, VK, OK,
-           /*TypeDependent=*/false, base->isValueDependent()),
+           /*TypeDependent=*/false, base->isValueDependent(),
+           base->containsUnexpandedParameterPack()),
       PropertyOrGetter(PD, false), Setter(0),
       IdLoc(l), ReceiverLoc(), Receiver(base) {
   }
@@ -257,7 +257,8 @@ public:
                       ExprValueKind VK, ExprObjectKind OK,
                       SourceLocation l, SourceLocation sl, QualType st)
     : Expr(ObjCPropertyRefExprClass, t, VK, OK,
-           /*TypeDependent=*/false, false),
+           /*TypeDependent=*/false, false, 
+           st->containsUnexpandedParameterPack()),
       PropertyOrGetter(PD, false), Setter(0),
       IdLoc(l), ReceiverLoc(sl), Receiver(st.getTypePtr()) {
   }
@@ -266,7 +267,8 @@ public:
                       QualType T, ExprValueKind VK, ExprObjectKind OK,
                       SourceLocation IdLoc, Expr *Base)
     : Expr(ObjCPropertyRefExprClass, T, VK, OK, false,
-           Base->isValueDependent()),
+           Base->isValueDependent(), 
+           Base->containsUnexpandedParameterPack()),
       PropertyOrGetter(Getter, true), Setter(Setter),
       IdLoc(IdLoc), ReceiverLoc(), Receiver(Base) {
   }
@@ -275,7 +277,7 @@ public:
                       QualType T, ExprValueKind VK, ExprObjectKind OK,
                       SourceLocation IdLoc,
                       SourceLocation SuperLoc, QualType SuperTy)
-    : Expr(ObjCPropertyRefExprClass, T, VK, OK, false, false),
+    : Expr(ObjCPropertyRefExprClass, T, VK, OK, false, false, false),
       PropertyOrGetter(Getter, true), Setter(Setter),
       IdLoc(IdLoc), ReceiverLoc(SuperLoc), Receiver(SuperTy.getTypePtr()) {
   }
@@ -284,7 +286,7 @@ public:
                       QualType T, ExprValueKind VK, ExprObjectKind OK,
                       SourceLocation IdLoc,
                       SourceLocation ReceiverLoc, ObjCInterfaceDecl *Receiver)
-    : Expr(ObjCPropertyRefExprClass, T, VK, OK, false, false),
+    : Expr(ObjCPropertyRefExprClass, T, VK, OK, false, false, false),
       PropertyOrGetter(Getter, true), Setter(Setter),
       IdLoc(IdLoc), ReceiverLoc(ReceiverLoc), Receiver(Receiver) {
   }
@@ -333,16 +335,16 @@ public:
   
   SourceLocation getReceiverLocation() const { return ReceiverLoc; }
   QualType getSuperReceiverType() const { 
-    return QualType(Receiver.get<Type*>(), 0); 
+    return QualType(Receiver.get<const Type*>(), 0); 
   }
   ObjCInterfaceDecl *getClassReceiver() const {
     return Receiver.get<ObjCInterfaceDecl*>();
   }
   bool isObjectReceiver() const { return Receiver.is<Stmt*>(); }
-  bool isSuperReceiver() const { return Receiver.is<Type*>(); }
+  bool isSuperReceiver() const { return Receiver.is<const Type*>(); }
   bool isClassReceiver() const { return Receiver.is<ObjCInterfaceDecl*>(); }
 
-  virtual SourceRange getSourceRange() const {
+  SourceRange getSourceRange() const {
     return SourceRange((isObjectReceiver() ? getBase()->getLocStart()
                                            : getReceiverLocation()), 
                        IdLoc);
@@ -354,8 +356,14 @@ public:
   static bool classof(const ObjCPropertyRefExpr *) { return true; }
 
   // Iterators
-  virtual child_iterator child_begin();
-  virtual child_iterator child_end();
+  child_range children() {
+    if (Receiver.is<Stmt*>()) {
+      Stmt **begin = reinterpret_cast<Stmt**>(&Receiver); // hack!
+      return child_range(begin, begin+1);
+    }
+    return child_range();
+  }
+
 private:
   friend class ASTStmtReader;
   void setExplicitProperty(ObjCPropertyDecl *D) {
@@ -426,6 +434,9 @@ class ObjCMessageExpr : public Expr {
   /// referring to the method that we type-checked against.
   uintptr_t SelectorOrMethod;
 
+  /// \brief Location of the selector.
+  SourceLocation SelectorLoc;
+
   /// \brief The source locations of the open and close square
   /// brackets ('[' and ']', respectively).
   SourceLocation LBracLoc, RBracLoc;
@@ -440,6 +451,7 @@ class ObjCMessageExpr : public Expr {
                   bool IsInstanceSuper,
                   QualType SuperType,
                   Selector Sel, 
+                  SourceLocation SelLoc,
                   ObjCMethodDecl *Method,
                   Expr **Args, unsigned NumArgs,
                   SourceLocation RBracLoc);
@@ -447,6 +459,7 @@ class ObjCMessageExpr : public Expr {
                   SourceLocation LBracLoc,
                   TypeSourceInfo *Receiver,
                   Selector Sel, 
+                  SourceLocation SelLoc,
                   ObjCMethodDecl *Method,
                   Expr **Args, unsigned NumArgs,
                   SourceLocation RBracLoc);
@@ -454,6 +467,7 @@ class ObjCMessageExpr : public Expr {
                   SourceLocation LBracLoc,
                   Expr *Receiver,
                   Selector Sel, 
+                  SourceLocation SelLoc,
                   ObjCMethodDecl *Method,
                   Expr **Args, unsigned NumArgs,
                   SourceLocation RBracLoc);
@@ -516,6 +530,7 @@ public:
                                  bool IsInstanceSuper,
                                  QualType SuperType,
                                  Selector Sel, 
+                                 SourceLocation SelLoc,
                                  ObjCMethodDecl *Method,
                                  Expr **Args, unsigned NumArgs,
                                  SourceLocation RBracLoc);
@@ -550,6 +565,7 @@ public:
                                  SourceLocation LBracLoc,
                                  TypeSourceInfo *Receiver,
                                  Selector Sel, 
+                                 SourceLocation SelLoc,
                                  ObjCMethodDecl *Method,
                                  Expr **Args, unsigned NumArgs,
                                  SourceLocation RBracLoc);
@@ -584,6 +600,7 @@ public:
                                  SourceLocation LBracLoc,
                                  Expr *Receiver,
                                  Selector Sel, 
+                                 SourceLocation SelLoc,
                                  ObjCMethodDecl *Method,
                                  Expr **Args, unsigned NumArgs,
                                  SourceLocation RBracLoc);
@@ -600,6 +617,9 @@ public:
   /// \brief Determine the kind of receiver that this message is being
   /// sent to.
   ReceiverKind getReceiverKind() const { return (ReceiverKind)Kind; }
+
+  /// \brief Source range of the receiver.
+  SourceRange getReceiverRange() const;
 
   /// \brief Determine whether this is an instance message to either a
   /// computed object or to super.
@@ -727,11 +747,11 @@ public:
 
   /// \brief Retrieve the arguments to this message, not including the
   /// receiver.
-  Stmt **getArgs() {
-    return reinterpret_cast<Stmt **>(this + 1) + 1;
+  Expr **getArgs() {
+    return reinterpret_cast<Expr **>(this + 1) + 1;
   }
-  const Stmt * const *getArgs() const {
-    return reinterpret_cast<const Stmt * const *>(this + 1) + 1;
+  const Expr * const *getArgs() const {
+    return reinterpret_cast<const Expr * const *>(this + 1) + 1;
   }
 
   /// getArg - Return the specified argument.
@@ -751,15 +771,13 @@ public:
 
   SourceLocation getLeftLoc() const { return LBracLoc; }
   SourceLocation getRightLoc() const { return RBracLoc; }
-
-  void setLeftLoc(SourceLocation L) { LBracLoc = L; }
-  void setRightLoc(SourceLocation L) { RBracLoc = L; }
+  SourceLocation getSelectorLoc() const { return SelectorLoc; }
 
   void setSourceRange(SourceRange R) {
     LBracLoc = R.getBegin();
     RBracLoc = R.getEnd();
   }
-  virtual SourceRange getSourceRange() const {
+  SourceRange getSourceRange() const {
     return SourceRange(LBracLoc, RBracLoc);
   }
 
@@ -769,16 +787,24 @@ public:
   static bool classof(const ObjCMessageExpr *) { return true; }
 
   // Iterators
-  virtual child_iterator child_begin();
-  virtual child_iterator child_end();
+  child_range children();
 
   typedef ExprIterator arg_iterator;
   typedef ConstExprIterator const_arg_iterator;
 
-  arg_iterator arg_begin() { return getArgs(); }
-  arg_iterator arg_end()   { return getArgs() + NumArgs; }
-  const_arg_iterator arg_begin() const { return getArgs(); }
-  const_arg_iterator arg_end() const { return getArgs() + NumArgs; }
+  arg_iterator arg_begin() { return reinterpret_cast<Stmt **>(getArgs()); }
+  arg_iterator arg_end()   { 
+    return reinterpret_cast<Stmt **>(getArgs() + NumArgs); 
+  }
+  const_arg_iterator arg_begin() const { 
+    return reinterpret_cast<Stmt const * const*>(getArgs()); 
+  }
+  const_arg_iterator arg_end() const { 
+    return reinterpret_cast<Stmt const * const*>(getArgs() + NumArgs); 
+  }
+
+  friend class ASTStmtReader;
+  friend class ASTStmtWriter;
 };
 
 /// ObjCIsaExpr - Represent X->isa and X.isa when X is an ObjC 'id' type.
@@ -795,7 +821,8 @@ class ObjCIsaExpr : public Expr {
 public:
   ObjCIsaExpr(Expr *base, bool isarrow, SourceLocation l, QualType ty)
     : Expr(ObjCIsaExprClass, ty, VK_LValue, OK_Ordinary,
-           /*TypeDependent=*/false, base->isValueDependent()),
+           /*TypeDependent=*/false, base->isValueDependent(),
+           /*ContainsUnexpandedParameterPack=*/false),
       Base(base), IsaMemberLoc(l), IsArrow(isarrow) {}
 
   /// \brief Build an empty expression.
@@ -812,11 +839,11 @@ public:
   SourceLocation getIsaMemberLoc() const { return IsaMemberLoc; }
   void setIsaMemberLoc(SourceLocation L) { IsaMemberLoc = L; }
 
-  virtual SourceRange getSourceRange() const {
+  SourceRange getSourceRange() const {
     return SourceRange(getBase()->getLocStart(), IsaMemberLoc);
   }
 
-  virtual SourceLocation getExprLoc() const { return IsaMemberLoc; }
+  SourceLocation getExprLoc() const { return IsaMemberLoc; }
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == ObjCIsaExprClass;
@@ -824,8 +851,7 @@ public:
   static bool classof(const ObjCIsaExpr *) { return true; }
 
   // Iterators
-  virtual child_iterator child_begin();
-  virtual child_iterator child_end();
+  child_range children() { return child_range(&Base, &Base+1); }
 };
 
 }  // end namespace clang

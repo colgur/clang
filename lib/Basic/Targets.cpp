@@ -210,6 +210,25 @@ public:
   FreeBSDTargetInfo(const std::string &triple)
     : OSTargetInfo<Target>(triple) {
       this->UserLabelPrefix = "";
+
+      llvm::Triple Triple(triple);
+      switch (Triple.getArch()) {
+        default:
+        case llvm::Triple::x86:
+        case llvm::Triple::x86_64:
+          this->MCountName = ".mcount";
+          break;
+        case llvm::Triple::mips:
+        case llvm::Triple::mipsel:
+        case llvm::Triple::ppc:
+        case llvm::Triple::ppc64:
+          this->MCountName = "_mcount";
+          break;
+        case llvm::Triple::arm:
+          this->MCountName = "__mcount";
+          break;
+      }
+
     }
 };
 
@@ -257,6 +276,7 @@ public:
   LinuxTargetInfo(const std::string& triple)
     : OSTargetInfo<Target>(triple) {
     this->UserLabelPrefix = "";
+    this->WIntType = TargetInfo::UnsignedInt;
   }
 };
 
@@ -479,17 +499,6 @@ public:
   virtual void getTargetDefines(const LangOptions &Opts,
                                 MacroBuilder &Builder) const;
 
-  virtual const char *getVAListDeclaration() const {
-    return "typedef char* __builtin_va_list;";
-    // This is the right definition for ABI/V4: System V.4/eabi.
-    /*return "typedef struct __va_list_tag {"
-           "  unsigned char gpr;"
-           "  unsigned char fpr;"
-           "  unsigned short reserved;"
-           "  void* overflow_arg_area;"
-           "  void* reg_save_area;"
-           "} __builtin_va_list[1];";*/
-  }
   virtual void getGCCRegNames(const char * const *&Names,
                               unsigned &NumNames) const;
   virtual void getGCCRegAliases(const GCCRegAlias *&Aliases,
@@ -754,7 +763,18 @@ public:
                         "i64:64:64-f32:32:32-f64:64:64-v128:128:128-n32";
 
     if (getTriple().getOS() == llvm::Triple::FreeBSD)
-        this->SizeType = TargetInfo::UnsignedInt;
+        SizeType = UnsignedInt;
+  }
+
+  virtual const char *getVAListDeclaration() const {
+    // This is the ELF definition, and is overridden by the Darwin sub-target
+    return "typedef struct __va_list_tag {"
+           "  unsigned char gpr;"
+           "  unsigned char fpr;"
+           "  unsigned short reserved;"
+           "  void* overflow_arg_area;"
+           "  void* reg_save_area;"
+           "} __builtin_va_list[1];";
   }
 };
 } // end anonymous namespace.
@@ -770,17 +790,24 @@ public:
     DescriptionString = "E-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-"
                         "i64:64:64-f32:32:32-f64:64:64-v128:128:128-n32:64";
   }
+  virtual const char *getVAListDeclaration() const {
+    return "typedef char* __builtin_va_list;";
+  }
 };
 } // end anonymous namespace.
 
 
 namespace {
-class DarwinPPCTargetInfo :
-  public DarwinTargetInfo<PPCTargetInfo> {
+class DarwinPPC32TargetInfo :
+  public DarwinTargetInfo<PPC32TargetInfo> {
 public:
-  DarwinPPCTargetInfo(const std::string& triple)
-    : DarwinTargetInfo<PPCTargetInfo>(triple) {
+  DarwinPPC32TargetInfo(const std::string& triple)
+    : DarwinTargetInfo<PPC32TargetInfo>(triple) {
     HasAlignMac68kSupport = true;
+    BoolWidth = BoolAlign = 32; //XXX support -mone-byte-bool?
+  }
+  virtual const char *getVAListDeclaration() const {
+    return "typedef char* __builtin_va_list;";
   }
 };
 
@@ -802,8 +829,7 @@ class MBlazeTargetInfo : public TargetInfo {
 
 public:
   MBlazeTargetInfo(const std::string& triple) : TargetInfo(triple) {
-    DescriptionString = "E-p:32:32-i8:8:8-i16:16:16-i64:32:32-f64:32:32-"
-                        "v64:32:32-v128:32:32-n32";
+    DescriptionString = "E-p:32:32:32-i8:8:8-i16:16:16";
   }
 
   virtual void getTargetBuiltins(const Builtin::Info *&Records,
@@ -1063,6 +1089,9 @@ void X86TargetInfo::getDefaultFeatures(const std::string &CPU,
   } else if (CPU == "k8" || CPU == "opteron" || CPU == "athlon64" ||
            CPU == "athlon-fx") {
     setFeatureEnabled(Features, "sse2", true);
+    setFeatureEnabled(Features, "3dnowa", true);
+  } else if (CPU == "k8-sse3") {
+    setFeatureEnabled(Features, "sse3", true);
     setFeatureEnabled(Features, "3dnowa", true);
   } else if (CPU == "c3-2")
     setFeatureEnabled(Features, "sse", true);
@@ -1569,11 +1598,15 @@ public:
     SizeType = UnsignedLongLong;
     PtrDiffType = SignedLongLong;
     IntPtrType = SignedLongLong;
+    this->UserLabelPrefix = "";
   }
   virtual void getTargetDefines(const LangOptions &Opts,
                                 MacroBuilder &Builder) const {
     WindowsTargetInfo<X86_64TargetInfo>::getTargetDefines(Opts, Builder);
     Builder.defineMacro("_WIN64");
+  }
+  virtual const char *getVAListDeclaration() const {
+    return "typedef char* __builtin_va_list;";
   }
 };
 } // end anonymous namespace
@@ -1592,9 +1625,6 @@ public:
     Builder.defineMacro("_M_X64");
     Builder.defineMacro("_M_AMD64");
   }
-  virtual const char *getVAListDeclaration() const {
-    return "typedef char* __builtin_va_list;";
-  }
 };
 } // end anonymous namespace
 
@@ -1611,7 +1641,7 @@ public:
     DefineStd(Builder, "WIN64", Opts);
     Builder.defineMacro("__MSVCRT__");
     Builder.defineMacro("__MINGW64__");
-    Builder.defineMacro("__declspec");
+    Builder.defineMacro("__declspec", "__declspec");
   }
 };
 } // end anonymous namespace
@@ -1802,6 +1832,7 @@ public:
       .Cases("arm1136jf-s", "mpcorenovfp", "mpcore", "6K")
       .Cases("arm1156t2-s", "arm1156t2f-s", "6T2")
       .Cases("cortex-a8", "cortex-a9", "7A")
+      .Case("cortex-m3", "7M")
       .Default(0);
   }
   virtual bool setCPU(const std::string &Name) {
@@ -2576,7 +2607,7 @@ static TargetInfo *AllocateTarget(const std::string &T) {
 
   case llvm::Triple::ppc:
     if (os == llvm::Triple::Darwin)
-      return new DarwinPPCTargetInfo(T);
+      return new DarwinPPC32TargetInfo(T);
     else if (os == llvm::Triple::FreeBSD)
       return new FreeBSDTargetInfo<PPC32TargetInfo>(T);
     return new PPC32TargetInfo(T);
@@ -2663,7 +2694,10 @@ static TargetInfo *AllocateTarget(const std::string &T) {
     case llvm::Triple::MinGW64:
       return new MinGWX86_64TargetInfo(T);
     case llvm::Triple::Win32:   // This is what Triple.h supports now.
-      return new VisualStudioWindowsX86_64TargetInfo(T);
+      if (Triple.getEnvironment() == llvm::Triple::MachO)
+        return new DarwinX86_64TargetInfo(T);
+      else
+        return new VisualStudioWindowsX86_64TargetInfo(T);
     default:
       return new X86_64TargetInfo(T);
     }

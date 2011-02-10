@@ -32,7 +32,11 @@ static QualType Desugar(ASTContext &Context, QualType QT, bool &ShouldAKA) {
       QT = cast<ElaboratedType>(Ty)->desugar();
       continue;
     }
-
+    // ... or a paren type ...
+    if (isa<ParenType>(Ty)) {
+      QT = cast<ParenType>(Ty)->desugar();
+      continue;
+    }
     // ...or a substituted template type parameter.
     if (isa<SubstTemplateTypeParmType>(Ty)) {
       QT = cast<SubstTemplateTypeParmType>(Ty)->desugar();
@@ -99,9 +103,12 @@ break; \
   } else if (const LValueReferenceType *Ty = QT->getAs<LValueReferenceType>()) {
     QT = Context.getLValueReferenceType(Desugar(Context, Ty->getPointeeType(),
                                                 ShouldAKA));
+  } else if (const RValueReferenceType *Ty = QT->getAs<RValueReferenceType>()) {
+    QT = Context.getRValueReferenceType(Desugar(Context, Ty->getPointeeType(),
+                                                ShouldAKA));
   }
 
-  return QC.apply(QT);
+  return QC.apply(Context, QT);
 }
 
 /// \brief Convert the given type to a string suitable for printing as part of 

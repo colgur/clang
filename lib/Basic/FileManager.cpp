@@ -21,9 +21,11 @@
 #include "clang/Basic/FileSystemStatCache.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/system_error.h"
 #include "llvm/Config/config.h"
 #include <map>
 #include <set>
@@ -348,22 +350,52 @@ FileManager::getVirtualFile(llvm::StringRef Filename, off_t Size,
     FileEntries.GetOrCreateValue(Filename);
 
   // See if there is already an entry in the map.
-  if (NamedFileEnt.getValue())
-    return NamedFileEnt.getValue() == NON_EXISTENT_FILE
-                 ? 0 : NamedFileEnt.getValue();
+  if (NamedFileEnt.getValue() && NamedFileEnt.getValue() != NON_EXISTENT_FILE)
+    return NamedFileEnt.getValue();
 
   ++NumFileCacheMisses;
 
   // By default, initialize it to invalid.
   NamedFileEnt.setValue(NON_EXISTENT_FILE);
 
+  // We allow the directory to not exist. If it does exist we store it.
+  FileEntry *UFE = 0;
   const DirectoryEntry *DirInfo = getDirectoryFromFile(*this, Filename);
-  if (DirInfo == 0)  // Directory doesn't exist, file can't exist.
-    return 0;
+  if (DirInfo) {
+    // Check to see if the file exists. If so, drop the virtual file
+    int FileDescriptor = -1;
+    struct stat StatBuf;
+    const char *InterndFileName = NamedFileEnt.getKeyData();
+    if (getStatValue(InterndFileName, StatBuf, &FileDescriptor) == 0) {
+      // If the stat process opened the file, close it to avoid a FD leak.
+      if (FileDescriptor != -1)
+        close(FileDescriptor);
 
-  FileEntry *UFE = new FileEntry();
-  VirtualFileEntries.push_back(UFE);
-  NamedFileEnt.setValue(UFE);
+      StatBuf.st_size = Size;
+      StatBuf.st_mtime = ModificationTime;
+      UFE = &UniqueFiles.getFile(InterndFileName, StatBuf);
+
+      NamedFileEnt.setValue(UFE);
+
+      // If we had already opened this file, close it now so we don't
+      // leak the descriptor. We're not going to use the file
+      // descriptor anyway, since this is a virtual file.
+      if (UFE->FD != -1) {
+        close(UFE->FD); 
+        UFE->FD = -1;
+      }
+
+      // If we already have an entry with this inode, return it.
+      if (UFE->getName()) 
+        return UFE;
+    }
+  }
+
+  if (!UFE) {
+    UFE = new FileEntry();
+    VirtualFileEntries.push_back(UFE);
+    NamedFileEnt.setValue(UFE);
+  }
 
   // Get the null-terminated file name as stored as the key of the
   // FileEntries map.
@@ -374,63 +406,70 @@ FileManager::getVirtualFile(llvm::StringRef Filename, off_t Size,
   UFE->ModTime = ModificationTime;
   UFE->Dir     = DirInfo;
   UFE->UID     = NextFileUID++;
-  
-  // If this virtual file resolves to a file, also map that file to the 
-  // newly-created file entry.
-  int FileDescriptor = -1;
-  struct stat StatBuf;
-  if (getStatValue(InterndFileName, StatBuf, &FileDescriptor))
-    return UFE;
-  
-  UFE->FD = FileDescriptor;
-  llvm::sys::Path FilePath(UFE->Name);
-  FilePath.makeAbsolute();
-  FileEntries[FilePath.str()] = UFE;
+  UFE->FD      = -1;
   return UFE;
 }
 
 void FileManager::FixupRelativePath(llvm::sys::Path &path,
                                     const FileSystemOptions &FSOpts) {
-  if (FSOpts.WorkingDir.empty() || path.isAbsolute()) return;
-  
-  llvm::sys::Path NewPath(FSOpts.WorkingDir);
-  NewPath.appendComponent(path.str());
+  if (FSOpts.WorkingDir.empty() || llvm::sys::path::is_absolute(path.str()))
+    return;
+
+  llvm::SmallString<128> NewPath(FSOpts.WorkingDir);
+  llvm::sys::path::append(NewPath, path.str());
   path = NewPath;
 }
 
 llvm::MemoryBuffer *FileManager::
 getBufferForFile(const FileEntry *Entry, std::string *ErrorStr) {
+  llvm::OwningPtr<llvm::MemoryBuffer> Result;
+  llvm::error_code ec;
   if (FileSystemOpts.WorkingDir.empty()) {
     const char *Filename = Entry->getName();
     // If the file is already open, use the open file descriptor.
     if (Entry->FD != -1) {
-      llvm::MemoryBuffer *Buf =
-        llvm::MemoryBuffer::getOpenFile(Entry->FD, Filename, ErrorStr,
-                                        Entry->getSize());
-      // getOpenFile will have closed the file descriptor, don't reuse or
-      // reclose it.
+      ec = llvm::MemoryBuffer::getOpenFile(Entry->FD, Filename, Result,
+                                           Entry->getSize());
+      if (ErrorStr)
+        *ErrorStr = ec.message();
+
+      close(Entry->FD);
       Entry->FD = -1;
-      return Buf;
+      return Result.take();
     }
 
     // Otherwise, open the file.
-    return llvm::MemoryBuffer::getFile(Filename, ErrorStr, Entry->getSize());
+    ec = llvm::MemoryBuffer::getFile(Filename, Result, Entry->getSize());
+    if (ec && ErrorStr)
+      *ErrorStr = ec.message();
+    return Result.take();
   }
   
   llvm::sys::Path FilePath(Entry->getName());
   FixupRelativePath(FilePath, FileSystemOpts);
-  return llvm::MemoryBuffer::getFile(FilePath.c_str(), ErrorStr,
-                                     Entry->getSize());
+  ec = llvm::MemoryBuffer::getFile(FilePath.c_str(), Result, Entry->getSize());
+  if (ec && ErrorStr)
+    *ErrorStr = ec.message();
+  return Result.take();
 }
 
 llvm::MemoryBuffer *FileManager::
 getBufferForFile(llvm::StringRef Filename, std::string *ErrorStr) {
-  if (FileSystemOpts.WorkingDir.empty())
-    return llvm::MemoryBuffer::getFile(Filename, ErrorStr);
-  
+  llvm::OwningPtr<llvm::MemoryBuffer> Result;
+  llvm::error_code ec;
+  if (FileSystemOpts.WorkingDir.empty()) {
+    ec = llvm::MemoryBuffer::getFile(Filename, Result);
+    if (ec && ErrorStr)
+      *ErrorStr = ec.message();
+    return Result.take();
+  }
+
   llvm::sys::Path FilePath(Filename);
   FixupRelativePath(FilePath, FileSystemOpts);
-  return llvm::MemoryBuffer::getFile(FilePath.c_str(), ErrorStr);
+  ec = llvm::MemoryBuffer::getFile(FilePath.c_str(), Result);
+  if (ec && ErrorStr)
+    *ErrorStr = ec.message();
+  return Result.take();
 }
 
 /// getStatValue - Get the 'stat' information for the specified path, using the
@@ -454,6 +493,25 @@ bool FileManager::getStatValue(const char *Path, struct stat &StatBuf,
                                   StatCache.get());
 }
 
+void FileManager::GetUniqueIDMapping(
+                   llvm::SmallVectorImpl<const FileEntry *> &UIDToFiles) const {
+  UIDToFiles.clear();
+  UIDToFiles.resize(NextFileUID);
+  
+  // Map file entries
+  for (llvm::StringMap<FileEntry*, llvm::BumpPtrAllocator>::const_iterator
+         FE = FileEntries.begin(), FEEnd = FileEntries.end();
+       FE != FEEnd; ++FE)
+    if (FE->getValue() && FE->getValue() != NON_EXISTENT_FILE)
+      UIDToFiles[FE->getValue()->getUID()] = FE->getValue();
+  
+  // Map virtual file entries
+  for (llvm::SmallVector<FileEntry*, 4>::const_iterator 
+         VFE = VirtualFileEntries.begin(), VFEEnd = VirtualFileEntries.end();
+       VFE != VFEEnd; ++VFE)
+    if (*VFE && *VFE != NON_EXISTENT_FILE)
+      UIDToFiles[(*VFE)->getUID()] = *VFE;
+}
 
 
 void FileManager::PrintStats() const {

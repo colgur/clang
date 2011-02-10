@@ -27,9 +27,10 @@ void ASTRecordLayout::Destroy(ASTContext &Ctx) {
   Ctx.Deallocate(this);
 }
 
-ASTRecordLayout::ASTRecordLayout(ASTContext &Ctx, uint64_t size, unsigned alignment,
-                unsigned datasize, const uint64_t *fieldoffsets,
-                unsigned fieldcount)
+ASTRecordLayout::ASTRecordLayout(const ASTContext &Ctx, CharUnits size,
+                                 unsigned alignment, unsigned datasize,
+                                 const uint64_t *fieldoffsets,
+                                 unsigned fieldcount)
   : Size(size), DataSize(datasize), FieldOffsets(0), Alignment(alignment),
     FieldCount(fieldcount), CXXInfo(0) {
   if (FieldCount > 0)  {
@@ -39,13 +40,13 @@ ASTRecordLayout::ASTRecordLayout(ASTContext &Ctx, uint64_t size, unsigned alignm
 }
 
 // Constructor for C++ records.
-ASTRecordLayout::ASTRecordLayout(ASTContext &Ctx,
-                                 uint64_t size, unsigned alignment,
+ASTRecordLayout::ASTRecordLayout(const ASTContext &Ctx,
+                                 CharUnits size, unsigned alignment,
                                  uint64_t datasize,
                                  const uint64_t *fieldoffsets,
                                  unsigned fieldcount,
-                                 uint64_t nonvirtualsize,
-                                 unsigned nonvirtualalign,
+                                 CharUnits nonvirtualsize,
+                                 CharUnits nonvirtualalign,
                                  CharUnits SizeOfLargestEmptySubobject,
                                  const CXXRecordDecl *PrimaryBase,
                                  bool IsPrimaryBaseVirtual,

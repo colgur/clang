@@ -30,17 +30,19 @@ static SourceLocation GetUnreachableLoc(const CFGBlock &b, SourceRange &R1,
   unsigned sn = 0;
   R1 = R2 = SourceRange();
 
-top:
   if (sn < b.size()) {
     CFGStmt CS = b[sn].getAs<CFGStmt>();
     if (!CS)
-      goto top;
-    
+      return SourceLocation();
+
     S = CS.getStmt(); 
   } else if (b.getTerminator())
     S = b.getTerminator();
   else
     return SourceLocation();
+
+  if (const Expr *Ex = dyn_cast<Expr>(S))
+    S = Ex->IgnoreParenImpCasts();
 
   switch (S->getStmtClass()) {
     case Expr::BinaryOperatorClass: {
@@ -101,9 +103,6 @@ top:
       R1 = CE->getSubExpr()->getSourceRange();
       return CE->getTypeBeginLoc();
     }
-    case Expr::ImplicitCastExprClass:
-      ++sn;
-      goto top;
     case Stmt::CXXTryStmtClass: {
       return cast<CXXTryStmt>(S)->getHandler(0)->getCatchLoc();
     }

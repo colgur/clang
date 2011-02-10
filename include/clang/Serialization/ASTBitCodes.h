@@ -148,7 +148,10 @@ namespace clang {
       DECLTYPES_BLOCK_ID,
 
       /// \brief The block containing DECL_UPDATES records.
-      DECL_UPDATES_BLOCK_ID
+      DECL_UPDATES_BLOCK_ID,
+      
+      /// \brief The block containing the detailed preprocessing record.
+      PREPROCESSOR_DETAIL_BLOCK_ID
     };
 
     /// \brief Record types that occur within the AST block itself.
@@ -343,8 +346,14 @@ namespace clang {
       /// sets.
       CXX_BASE_SPECIFIER_OFFSETS = 37,
 
-      /// \brief Record code for diagnostic mappings specified by the user.
-      DIAG_USER_MAPPINGS = 38
+      /// \brief Record code for #pragma diagnostic mappings.
+      DIAG_PRAGMA_MAPPINGS = 38,
+
+      /// \brief Record code for special CUDA declarations.
+      CUDA_SPECIAL_DECL_REFS = 39,
+      
+      /// \brief Record code for header search information.
+      HEADER_SEARCH_TABLE = 40
     };
 
     /// \brief Record types used within a source manager block.
@@ -383,20 +392,23 @@ namespace clang {
 
       /// \brief Describes one token.
       /// [PP_TOKEN, SLoc, Length, IdentInfoID, Kind, Flags]
-      PP_TOKEN = 3,
-
-      /// \brief Describes a macro instantiation within the preprocessing 
-      /// record.
-      PP_MACRO_INSTANTIATION = 4,
-      
-      /// \brief Describes a macro definition within the preprocessing record.
-      PP_MACRO_DEFINITION = 5,
-      
-      /// \brief Describes am inclusion directive within the preprocessing
-      /// record.
-      PP_INCLUSION_DIRECTIVE = 6
+      PP_TOKEN = 3
     };
 
+    /// \brief Record types used within a preprocessor detail block.
+    enum PreprocessorDetailRecordTypes {
+      /// \brief Describes a macro instantiation within the preprocessing 
+      /// record.
+      PPD_MACRO_INSTANTIATION = 0,
+      
+      /// \brief Describes a macro definition within the preprocessing record.
+      PPD_MACRO_DEFINITION = 1,
+      
+      /// \brief Describes an inclusion directive within the preprocessing
+      /// record.
+      PPD_INCLUSION_DIRECTIVE = 2
+    };
+    
     /// \defgroup ASTAST AST file AST constants
     ///
     /// The constants in this group describe various components of the
@@ -549,7 +561,15 @@ namespace clang {
       /// \brief A DependentTemplateSpecializationType record.
       TYPE_DEPENDENT_TEMPLATE_SPECIALIZATION = 32,
       /// \brief A DependentSizedArrayType record.
-      TYPE_DEPENDENT_SIZED_ARRAY    = 33
+      TYPE_DEPENDENT_SIZED_ARRAY    = 33,
+      /// \brief A ParenType record.
+      TYPE_PAREN                    = 34,
+      /// \brief A PackExpansionType record.
+      TYPE_PACK_EXPANSION           = 35,
+      /// \brief An AttributedType record.
+      TYPE_ATTRIBUTED               = 36,
+      /// \brief A SubstTemplateTypeParmPackType record.
+      TYPE_SUBST_TEMPLATE_TYPE_PARM_PACK = 37
     };
 
     /// \brief The type IDs for special types constructed by semantic
@@ -720,7 +740,10 @@ namespace clang {
       /// \brief A record containing CXXBaseSpecifiers.
       DECL_CXX_BASE_SPECIFIERS,
       /// \brief A IndirectFieldDecl record.
-      DECL_INDIRECTFIELD
+      DECL_INDIRECTFIELD,
+      /// \brief A NonTypeTemplateParmDecl record that stores an expanded
+      /// non-type template parameter pack.
+      DECL_EXPANDED_NON_TYPE_TEMPLATE_PARM_PACK
     };
 
     /// \brief Record codes for each kind of statement or expression.
@@ -826,8 +849,6 @@ namespace clang {
       EXPR_ADDR_LABEL,
       /// \brief A StmtExpr record.
       EXPR_STMT,
-      /// \brief A TypesCompatibleExpr record.
-      EXPR_TYPES_COMPATIBLE,
       /// \brief A ChooseExpr record.
       EXPR_CHOOSE,
       /// \brief A GNUNullExpr record.
@@ -915,7 +936,7 @@ namespace clang {
       EXPR_CXX_DELETE,            // CXXDeleteExpr
       EXPR_CXX_PSEUDO_DESTRUCTOR, // CXXPseudoDestructorExpr
       
-      EXPR_CXX_EXPR_WITH_TEMPORARIES,    // CXXExprWithTemporaries
+      EXPR_EXPR_WITH_CLEANUPS,    // ExprWithCleanups
       
       EXPR_CXX_DEPENDENT_SCOPE_MEMBER,   // CXXDependentScopeMemberExpr
       EXPR_CXX_DEPENDENT_SCOPE_DECL_REF, // DependentScopeDeclRefExpr
@@ -926,7 +947,16 @@ namespace clang {
       EXPR_CXX_UNARY_TYPE_TRAIT,  // UnaryTypeTraitExpr
       EXPR_CXX_NOEXCEPT,          // CXXNoexceptExpr
 
-      EXPR_OPAQUE_VALUE           // OpaqueValueExpr
+      EXPR_OPAQUE_VALUE,          // OpaqueValueExpr
+      EXPR_BINARY_TYPE_TRAIT,     // BinaryTypeTraitExpr
+      
+      EXPR_PACK_EXPANSION,        // PackExpansionExpr
+      EXPR_SIZEOF_PACK,           // SizeOfPackExpr
+      EXPR_SUBST_NON_TYPE_TEMPLATE_PARM_PACK,// SubstNonTypeTemplateParmPackExpr
+
+      // CUDA
+
+      EXPR_CUDA_KERNEL_CALL       // CUDAKernelCallExpr
     };
 
     /// \brief The kinds of designators that can occur in a

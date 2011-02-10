@@ -68,6 +68,8 @@ public:
   unsigned AnalyzerStats : 1;
   unsigned EagerlyAssume : 1;
   unsigned IdempotentOps : 1;
+  unsigned ObjCSelfInitCheck : 1;
+  unsigned BufferOverflows : 1;
   unsigned PurgeDead : 1;
   unsigned TrimGraph : 1;
   unsigned VisualizeEGDot : 1;
@@ -78,6 +80,7 @@ public:
   unsigned UnoptimizedCFG : 1;
   unsigned CFGAddImplicitDtors : 1;
   unsigned CFGAddInitializers : 1;
+  unsigned EagerlyTrimEGraph : 1;
 
 public:
   AnalyzerOptions() {
@@ -89,6 +92,9 @@ public:
     AnalyzeNestedBlocks = 0;
     AnalyzerStats = 0;
     EagerlyAssume = 0;
+    IdempotentOps = 0;
+    ObjCSelfInitCheck = 0;
+    BufferOverflows = 0;    
     PurgeDead = 1;
     TrimGraph = 0;
     VisualizeEGDot = 0;
@@ -98,6 +104,7 @@ public:
     UnoptimizedCFG = 0;
     CFGAddImplicitDtors = 0;
     CFGAddInitializers = 0;
+    EagerlyTrimEGraph = 0;
   }
 };
 

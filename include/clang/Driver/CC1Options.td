@@ -64,12 +64,16 @@ def analysis_WarnObjCUnusedIvars : Flag<"-analyzer-check-objc-unused-ivars">,
   HelpText<"Warn about private ivars that are never used">;
 def analysis_ObjCMemChecker : Flag<"-analyzer-check-objc-mem">,
   HelpText<"Run the [Core] Foundation reference count checker">;
+def analysis_WarnObjCSelfInit : Flag<"-analyzer-check-objc-self-init">,
+  HelpText<"Warn about missing initialization of 'self' in an initializer">;
 def analysis_WarnSizeofPointer : Flag<"-warn-sizeof-pointer">,
   HelpText<"Warn about unintended use of sizeof() on pointer expressions">;
 def analysis_WarnIdempotentOps : Flag<"-analyzer-check-idempotent-operations">,
   HelpText<"Warn about idempotent operations">;
 def analysis_AnalyzerStats : Flag<"-analyzer-stats">,
   HelpText<"Emit warnings with analyzer statistics">;
+def analysis_WarnBufferOverflows : Flag<"-analyzer-check-buffer-overflows">,
+  HelpText<"Warn about buffer overflows">;
 
 def analyzer_store : Separate<"-analyzer-store">,
   HelpText<"Source Code Analysis - Abstract Memory Store Models">;
@@ -103,6 +107,8 @@ def analyzer_eagerly_assume : Flag<"-analyzer-eagerly-assume">,
   HelpText<"Eagerly assume the truth/falseness of some symbolic constraints">;
 def analyzer_no_purge_dead : Flag<"-analyzer-no-purge-dead">,
   HelpText<"Don't remove dead symbols, bindings, and constraints before processing a statement">;
+def analyzer_no_eagerly_trim_egraph : Flag<"-analyzer-no-eagerly-trim-egraph">,
+  HelpText<"Don't eagerly remove uninteresting ExplodedNodes from the ExplodedGraph">;
 def trim_egraph : Flag<"-trim-egraph">,
   HelpText<"Only show error-related paths in the analysis graph">;
 def analyzer_viz_egraph_graphviz : Flag<"-analyzer-viz-egraph-graphviz">,
@@ -171,6 +177,8 @@ def momit_leaf_frame_pointer : Flag<"-momit-leaf-frame-pointer">,
   HelpText<"Omit frame pointer setup for leaf functions.">;
 def msoft_float : Flag<"-msoft-float">,
   HelpText<"Use software floating point">;
+def mregparm : Separate<"-mregparm">,
+  HelpText<"Limit the number of registers available for integer arguments">;
 def mrelax_all : Flag<"-mrelax-all">,
   HelpText<"Relax all machine instructions">;
 def mrelocation_model : Separate<"-mrelocation-model">,
@@ -179,8 +187,11 @@ def munwind_tables : Flag<"-munwind-tables">,
   HelpText<"Generate unwinding tables for all functions">;
 def mconstructor_aliases : Flag<"-mconstructor-aliases">,
   HelpText<"Emit complete constructors and destructors as aliases when possible">;
+def mms_bitfields : Flag<"-mms-bitfields">,
+  HelpText<"Set the default structure layout to be compatible with the Microsoft compiler standard.">;
 def O : Joined<"-O">, HelpText<"Optimization level">;
 def Os : Flag<"-Os">, HelpText<"Optimize for size">;
+def pg : Flag<"-pg">, HelpText<"Enable mcount instrumentation">;
 
 //===----------------------------------------------------------------------===//
 // Dependency Output Options
@@ -190,6 +201,10 @@ def dependency_file : Separate<"-dependency-file">,
   HelpText<"Filename (or -) to write dependency output to">;
 def sys_header_deps : Flag<"-sys-header-deps">,
   HelpText<"Include system headers in dependency output">;
+def header_include_file : Separate<"-header-include-file">,
+  HelpText<"Filename (or -) to write header include output to">;
+def H : Flag<"-H">,
+  HelpText<"Show header includes and nesting depth">;
 def MQ : Separate<"-MQ">, HelpText<"Specify target to quote for dependency">;
 def MT : Separate<"-MT">, HelpText<"Specify target for dependency">;
 def MP : Flag<"-MP">,
@@ -288,10 +303,12 @@ def o : Separate<"-o">, MetaVarName<"<path>">, HelpText<"Specify output file">;
 def load : Separate<"-load">, MetaVarName<"<dsopath>">,
   HelpText<"Load the named plugin (dynamic shared object)">;
 def plugin : Separate<"-plugin">, MetaVarName<"<name>">,
-  HelpText<"Use the named plugin action (use \"help\" to list available options)">;
+  HelpText<"Use the named plugin action instead of the default action (use \"help\" to list available options)">;
 def plugin_arg : JoinedAndSeparate<"-plugin-arg-">,
     MetaVarName<"<name> <arg>">,
     HelpText<"Pass <arg> to plugin <name>">;
+def add_plugin : Separate<"-add-plugin">, MetaVarName<"<name>">,
+  HelpText<"Use the named plugin action in addition to the default action">;
 def resource_dir : Separate<"-resource-dir">,
   HelpText<"The directory which holds the compiler resource files">;
 def version : Flag<"-version">,
@@ -459,14 +476,16 @@ def fobjc_gc : Flag<"-fobjc-gc">,
   HelpText<"Enable Objective-C garbage collection">;
 def fobjc_gc_only : Flag<"-fobjc-gc-only">,
   HelpText<"Use GC exclusively for Objective-C related memory management">;
+def fapple_kext : Flag<"-fapple-kext">,
+  HelpText<"Use Apple's kernel extensions ABI">;
 def fobjc_dispatch_method_EQ : Joined<"-fobjc-dispatch-method=">,
   HelpText<"Objective-C dispatch method to use">;
+def fobjc_default_synthesize_properties : Flag<"-fobjc-default-synthesize-properties">,
+  HelpText<"enable the default synthesis of Objective-C properties">;
 def print_ivar_layout : Flag<"-print-ivar-layout">,
   HelpText<"Enable Objective-C Ivar layout bitmap print trace">;
 def fobjc_nonfragile_abi : Flag<"-fobjc-nonfragile-abi">,
   HelpText<"enable objective-c's nonfragile abi">;
-def fobjc_nonfragile_abi2 : Flag<"-fobjc-nonfragile-abi2">,
-  HelpText<"enable objective-c's enhanced nonfragile abi">;
 def ftrapv : Flag<"-ftrapv">,
   HelpText<"Trap on integer overflow">;
 def ftrapv_handler : Separate<"-ftrapv-handler">,
@@ -590,8 +609,6 @@ def dM : Flag<"-dM">,
   HelpText<"Print macro definitions in -E mode instead of normal output">;
 def dD : Flag<"-dD">,
   HelpText<"Print macro definitions in -E mode in addition to normal output">;
-def H : Flag<"-H">,
-  HelpText<"Show header includes and nesting depth">;
 
 //===----------------------------------------------------------------------===//
 // OpenCL Options

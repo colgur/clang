@@ -11,6 +11,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#ifdef HAVE_CLANG_CONFIG_H
+# include "clang/Config/config.h"
+#endif
+
 #include "clang/Frontend/Utils.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/LangOptions.h"
@@ -41,15 +45,14 @@ class InitHeaderSearch {
   std::vector<DirectoryLookup> IncludeGroup[4];
   HeaderSearch& Headers;
   bool Verbose;
-  llvm::sys::Path IncludeSysroot;
+  std::string IncludeSysroot;
+  bool IsNotEmptyOrRoot;
 
 public:
 
   InitHeaderSearch(HeaderSearch &HS, bool verbose, llvm::StringRef sysroot)
-    : Headers(HS), Verbose(verbose),
-      IncludeSysroot((sysroot.empty() || sysroot == "/") ?
-                     llvm::sys::Path::GetRootDirectory() :
-                     llvm::sys::Path(sysroot)) {
+    : Headers(HS), Verbose(verbose), IncludeSysroot(sysroot),
+      IsNotEmptyOrRoot(!(sysroot.empty() || sysroot == "/")) {
   }
 
   /// AddPath - Add the specified path to the specified group list.
@@ -65,7 +68,7 @@ public:
                                    llvm::StringRef Dir64,
                                    const llvm::Triple &triple);
 
-  /// AddMinGWCPlusPlusIncludePaths - Add the necessary paths to suport a MinGW
+  /// AddMinGWCPlusPlusIncludePaths - Add the necessary paths to support a MinGW
   ///  libstdc++.
   void AddMinGWCPlusPlusIncludePaths(llvm::StringRef Base,
                                      llvm::StringRef Arch,
@@ -106,14 +109,14 @@ void InitHeaderSearch::AddPath(const llvm::Twine &Path,
   // Compute the actual path, taking into consideration -isysroot.
   llvm::SmallString<256> MappedPathStorage;
   llvm::StringRef MappedPathStr = Path.toStringRef(MappedPathStorage);
-  llvm::sys::Path MappedPath(MappedPathStr);
 
   // Handle isysroot.
-  if (Group == System && !IgnoreSysRoot && MappedPath.isAbsolute() &&
-      IncludeSysroot != llvm::sys::Path::GetRootDirectory()) {
+  if (Group == System && !IgnoreSysRoot &&
+      llvm::sys::path::is_absolute(MappedPathStr) &&
+      IsNotEmptyOrRoot) {
     MappedPathStorage.clear();
     MappedPathStr =
-      (IncludeSysroot.str() + Path).toStringRef(MappedPathStorage);
+      (IncludeSysroot + Path).toStringRef(MappedPathStorage);
   }
 
   // Compute the DirectoryLookup type.
@@ -419,8 +422,16 @@ static bool getWindowsSDKDir(std::string &path) {
 
 void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
                                             const HeaderSearchOptions &HSOpts) {
-  // FIXME: temporary hack: hard-coded paths.
-  AddPath("/usr/local/include", System, true, false, false);
+  llvm::Triple::OSType os = triple.getOS();
+
+  switch (os) {
+  case llvm::Triple::NetBSD:
+    break;
+  default:
+    // FIXME: temporary hack: hard-coded paths.
+    AddPath("/usr/local/include", System, true, false, false);
+    break;
+  }
 
   // Builtin includes use #include_next directives and should be positioned
   // just prior C include dirs.
@@ -443,7 +454,7 @@ void InitHeaderSearch::AddDefaultCIncludePaths(const llvm::Triple &triple,
       AddPath(*i, System, false, false, false);
     return;
   }
-  llvm::Triple::OSType os = triple.getOS();
+
   switch (os) {
   case llvm::Triple::Win32: {
     std::string VSDir;
@@ -623,6 +634,8 @@ AddDefaultCPlusPlusIncludePaths(const llvm::Triple &triple) {
                                 "x86_64-linux-gnu", "32", "", triple);
     AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.4",
                                 "i486-linux-gnu", "", "64", triple);
+    AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.4",
+                                "arm-linux-gnueabi", "", "", triple);
     // Ubuntu 9.04 "Jaunty Jackalope" -- gcc-4.3.3
     // Ubuntu 8.10 "Intrepid Ibex"    -- gcc-4.3.2
     // Debian 5.0 "lenny"             -- gcc-4.3.2
